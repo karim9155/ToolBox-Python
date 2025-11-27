@@ -43,6 +43,14 @@ To add a new tool or endpoint:
 
 ### Using Docker (Recommended)
 
+You can run the application using the pre-built image from Docker Hub or build it locally.
+
+**Option 1: Pull from Docker Hub**
+```bash
+docker run -d -p 8000:8000 --name toolbox-api karimkli/toolbox-api:latest
+```
+
+**Option 2: Build Locally with Docker Compose**
 1. Build and start the services:
    ```bash
    docker-compose up -d

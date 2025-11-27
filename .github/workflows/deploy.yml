@@ -13,8 +13,8 @@ jobs:
     - name: Login to Docker Hub
       uses: docker/login-action@v3
       with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
+        username: ${{ secrets.karimkli }}
+        password: ${{ secrets.dckr_pat_4AZ2rNfbBuK-55LzCRH9Dhro-3U }}
         
     - name: Build and push
       uses: docker/build-push-action@v5
@@ -30,9 +30,15 @@ jobs:
     - name: Deploy to OVH VM
       uses: appleboy/ssh-action@v1.0.3
       with:
-        host: ${{ secrets.OVH_HOST }}
-        username: ${{ secrets.OVH_USER }}
-        key: ${{ secrets.OVH_SSH_KEY }}
+        host: ${{ secrets.54.37.78.55 }}
+        username: ${{ secrets.ubuntu }}
+        key: ${{ secrets.-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACDaM3WmtibZPKSq1BcgkFhwqfk9eV8LBQ6NhbYnI8mpDQAAAKA/v64jP7+u
+IwAAAAtzc2gtZWQyNTUxOQAAACDaM3WmtibZPKSq1BcgkFhwqfk9eV8LBQ6NhbYnI8mpDQ
+AAAECwwcYfe+lGPIf2wFeDIQH4NVHJB9nshExBXrfLw3lN+9ozdaa2Jtk8pKrUFyCQWHCp
++T15XwsFDo2FticjyakNAAAAGHNuYXByZXBvcnRhaTk5QGdtYWlsLmNvbQECAwQF
+-----END OPENSSH PRIVATE KEY----- }}
         script: |
           # Pull the new image
           docker pull karimkli/toolbox-api:latest
@@ -48,5 +54,5 @@ jobs:
             -p 8000:8000 \
             --name toolbox-api \
             --restart unless-stopped \
-            -e ASSEMBLYAI_API_KEY=${{ secrets.ASSEMBLYAI_API_KEY }} \
+            -e ASSEMBLYAI_API_KEY=${{ secrets.c3e32648f5044e319c10eba6142bf280 }} \
             karimkli/toolbox-api:latest

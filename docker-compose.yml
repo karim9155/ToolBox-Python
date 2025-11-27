@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    container_name: toolbox-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/code
+    environment:
+      - ASSEMBLYAI_API_KEY=${ASSEMBLYAI_API_KEY:-c3e32648f5044e319c10eba6142bf280}
+    restart: unless-stopped

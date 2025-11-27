@@ -2,12 +2,37 @@
 
 A comprehensive FastAPI service providing various utility tools for video processing, audio transcription, and audit time calculations.
 
+## Project Structure
+
+The project is structured for scalability and easy addition of new endpoints:
+
+```
+/app
+    /routers        # API route handlers (endpoints)
+        video.py    # Video processing endpoints
+        audio.py    # Audio transcription endpoints
+        audit.py    # Audit time calculation endpoints
+        fssc.py     # FSSC extraction endpoints
+    /services       # Business logic and external services
+    /utils          # Helper functions
+    main.py         # Application entry point
+Dockerfile          # Docker configuration
+docker-compose.yml  # Docker Compose configuration
+```
+
 ## Features
 
 - **Video Processing**: Extract the last frame from video files.
 - **Audio Transcription**: Transcribe audio files using AssemblyAI with speaker detection.
 - **Audit Calculations**: Calculate IFS Audit Time using automated browser interaction.
 - **FSSC Extraction**: Extract structured data from FSSC Audit Report PDFs.
+
+## Adding New Endpoints
+
+To add a new tool or endpoint:
+1. Create a new file in `app/routers/` (e.g., `new_tool.py`).
+2. Define your `APIRouter` and endpoints.
+3. Register the router in `app/main.py`.
 
 ## Installation & Setup
 
@@ -36,7 +61,7 @@ A comprehensive FastAPI service providing various utility tools for video proces
    ```
 3. Run the application:
    ```bash
-   uvicorn app:app --reload
+   uvicorn app.main:app --reload
    ```
 
 ## API Documentation

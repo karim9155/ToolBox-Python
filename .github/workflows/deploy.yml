@@ -32,13 +32,7 @@ jobs:
       with:
         host: ${{ secrets.54.37.78.55 }}
         username: ${{ secrets.ubuntu }}
-        key: ${{ secrets.-----BEGIN OPENSSH PRIVATE KEY-----
-b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
-QyNTUxOQAAACDaM3WmtibZPKSq1BcgkFhwqfk9eV8LBQ6NhbYnI8mpDQAAAKA/v64jP7+u
-IwAAAAtzc2gtZWQyNTUxOQAAACDaM3WmtibZPKSq1BcgkFhwqfk9eV8LBQ6NhbYnI8mpDQ
-AAAECwwcYfe+lGPIf2wFeDIQH4NVHJB9nshExBXrfLw3lN+9ozdaa2Jtk8pKrUFyCQWHCp
-+T15XwsFDo2FticjyakNAAAAGHNuYXByZXBvcnRhaTk5QGdtYWlsLmNvbQECAwQF
------END OPENSSH PRIVATE KEY----- }}
+        key: ${{ secrets.-----BEGIN OPENSSH PRIVATE KEY-----b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZWQyNTUxOQAAACDaM3WmtibZPKSq1BcgkFhwqfk9eV8LBQ6NhbYnI8mpDQAAAKA/v64jP7+uIwAAAAtzc2gtZWQyNTUxOQAAACDaM3WmtibZPKSq1BcgkFhwqfk9eV8LBQ6NhbYnI8mpDQAAAECwwcYfe+lGPIf2wFeDIQH4NVHJB9nshExBXrfLw3lN+9ozdaa2Jtk8pKrUFyCQWHCp+T15XwsFDo2FticjyakNAAAAGHNuYXByZXBvcnRhaTk5QGdtYWlsLmNvbQECAwQF-----END OPENSSH PRIVATE KEY-----}}
         script: |
           # Pull the new image
           docker pull karimkli/toolbox-api:latest

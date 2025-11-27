@@ -8,7 +8,9 @@ from app.utils.common import mmss
 
 router = APIRouter()
 
-API_KEY = os.getenv("ASSEMBLYAI_API_KEY", "c3e32648f5044e319c10eba6142bf280")
+API_KEY = os.getenv("ASSEMBLYAI_API_KEY")
+if not API_KEY:
+    print("Warning: ASSEMBLYAI_API_KEY not set. Transcription will fail.")
 BASE = "https://api.assemblyai.com"
 HEADERS = {"authorization": API_KEY}
 

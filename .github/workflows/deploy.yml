@@ -1,0 +1,52 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [ "master" ]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+        
+    - name: Build and push
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: karimkli/toolbox-api:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+    - name: Deploy to OVH VM
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.OVH_HOST }}
+        username: ${{ secrets.OVH_USER }}
+        key: ${{ secrets.OVH_SSH_KEY }}
+        script: |
+          # Pull the new image
+          docker pull karimkli/toolbox-api:latest
+          
+          # Stop and remove the existing container
+          docker stop toolbox-api || true
+          docker rm toolbox-api || true
+          
+          # Run the new container
+          # Note: We pass the API key from secrets if you want to keep it secure, 
+          # or rely on the default in the code if not set.
+          docker run -d \
+            -p 8000:8000 \
+            --name toolbox-api \
+            --restart unless-stopped \
+            -e ASSEMBLYAI_API_KEY=${{ secrets.ASSEMBLYAI_API_KEY }} \
+            karimkli/toolbox-api:latest

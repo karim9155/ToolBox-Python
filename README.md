@@ -72,6 +72,24 @@ docker run -d -p 8000:8000 --name toolbox-api karimkli/toolbox-api:latest
    uvicorn app.main:app --reload
    ```
 
+## CI/CD Deployment
+
+This project uses GitHub Actions for continuous deployment. When changes are pushed to the `master` branch, the workflow:
+1. Builds the Docker image.
+2. Pushes it to Docker Hub (`karimkli/toolbox-api`).
+3. Connects to the configured OVH VM via SSH.
+4. Pulls the new image and restarts the container.
+
+### Setup Secrets
+To enable the deployment, add the following secrets in your GitHub Repository settings (Settings > Secrets and variables > Actions):
+
+- `DOCKERHUB_USERNAME`: Your Docker Hub username.
+- `DOCKERHUB_TOKEN`: Your Docker Hub access token.
+- `OVH_HOST`: The IP address or hostname of your OVH VM.
+- `OVH_USER`: The SSH username for your VM (e.g., `ubuntu` or `root`).
+- `OVH_SSH_KEY`: The private SSH key for accessing the VM.
+- `ASSEMBLYAI_API_KEY`: Your AssemblyAI API Key.
+
 ## API Documentation
 
 Interactive Swagger documentation is available at `http://localhost:8000/docs`.

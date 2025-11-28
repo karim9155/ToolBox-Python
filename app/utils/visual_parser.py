@@ -140,6 +140,10 @@ class VisualParser:
                         if parent_node:
                             parent_node.children.append(new_node)
                         else:
+                            if current_node.content.strip():
+                                current_node.node_type = "requirement"
+                            else:
+                                current_node.node_type = "process"
                             root_children.append(new_node)
                         stack.append((level, new_node))
                     else:

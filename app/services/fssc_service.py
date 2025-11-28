@@ -18,6 +18,8 @@ def extract_fssc(file_bytes):
         flat_nodes = []
         for node in nodes:
             flat_nodes.extend(node.to_flat_list(document_id))
+        # Sort by display_order before returning
+        flat_nodes.sort(key=lambda n: n["display_order"])
         return flat_nodes
     finally:
         try:

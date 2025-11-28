@@ -140,21 +140,22 @@ class VisualParser:
                         if parent_node:
                             parent_node.children.append(new_node)
                         else:
-                            if current_node.content.strip():
-                                current_node.node_type = "requirement"
-                            else:
-                                current_node.node_type = "process"
+                            # Only access current_node if it exists
+                            if 'current_node' in locals() and current_node is not None:
+                                if hasattr(current_node, 'content') and current_node.content and current_node.content.strip():
+                                    current_node.node_type = "requirement"
+                                else:
+                                    current_node.node_type = "process"
                             root_children.append(new_node)
                         stack.append((level, new_node))
                     else:
                         prefix = ""
                         if x0 > 70:
                             prefix = "- "
-                        current_node = stack[-1][1]
-                        if current_node:
+                        current_node = stack[-1][1] if stack else None
+                        if current_node is not None:
                             if current_node.content:
                                 current_node.content += "\n"
                             current_node.content += f"{prefix}{text}"
-                        else:
-                            pass
+                        # If current_node is None, skip appending content
         return root_children

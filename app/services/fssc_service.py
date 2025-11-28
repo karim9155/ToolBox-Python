@@ -16,8 +16,12 @@ def extract_fssc(file_bytes):
         nodes = parser.parse()
         document_id = os.path.basename(tmp_path)
         flat_nodes = []
+        counter = [1]
         for node in nodes:
-            flat_nodes.extend(node.to_flat_list(document_id))
+            flat_nodes.extend(node.to_flat_list(document_id, counter=counter))
+        # Remove document_id from each node
+        for node in flat_nodes:
+            node.pop("document_id", None)
         # Sort by display_order before returning
         flat_nodes.sort(key=lambda n: n["display_order"])
         return flat_nodes

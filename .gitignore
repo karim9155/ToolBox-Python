@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv/
+.envrc
+*.sqlite3
+*.db
+*.log
+.DS_Store
+.idea/
+.vscode/
+*.ipynb_checkpoints/
+# Add more patterns as needed

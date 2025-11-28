@@ -1,8 +1,8 @@
 import os
 import tempfile
-from utils.visual_parser import VisualParser
-from utils.pdf_analyzer import PDFAnalyzer
-from utils.data_models import StandardNode
+from app.utils.visual_parser import VisualParser
+from app.utils.pdf_analyzer import PDFAnalyzer
+from app.utils.data_models import StandardNode
 
 def extract_fssc(file_bytes):
     # Save the uploaded file bytes to a temporary file

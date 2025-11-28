@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File
-from services.fssc_service import extract_fssc
+from app.services.fssc_service import extract_fssc
 
 router = APIRouter()
 

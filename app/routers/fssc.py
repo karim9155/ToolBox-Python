@@ -1,16 +1,16 @@
-from flask import Blueprint, request, jsonify
+from fastapi import APIRouter, HTTPException, UploadFile, File
 from services.fssc_service import extract_fssc
-from fastapi import APIRouter, HTTPException
 
 router = APIRouter()
 
-@router.post('/extract/fssc', methods=['POST'])
-def extract_fssc_endpoint():
-    pdf_path = request.json.get('pdf_path')
-    if not pdf_path:
-        return jsonify({'error': 'Missing pdf_path'}), 400
+@router.post('/extract/fssc')
+async def extract_fssc_endpoint(file: UploadFile = File(...)):
+    if not file:
+        raise HTTPException(status_code=400, detail="Missing file")
     try:
-        result = extract_fssc(pdf_path)
-        return jsonify({'nodes': result})
+        contents = await file.read()
+        # You may need to save the file or pass the bytes to extract_fssc
+        result = extract_fssc(contents)
+        return {'nodes': result}
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        raise HTTPException(status_code=500, detail=str(e))

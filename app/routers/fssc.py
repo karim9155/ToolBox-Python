@@ -1,10 +1,10 @@
-# routes/fssc_api.py
 from flask import Blueprint, request, jsonify
 from services.fssc_service import extract_fssc
+from fastapi import APIRouter, HTTPException
 
-fssc_bp = Blueprint('fssc_bp', __name__)
+router = APIRouter()
 
-@fssc_bp.route('/extract/fssc', methods=['POST'])
+@router.post('/extract/fssc', methods=['POST'])
 def extract_fssc_endpoint():
     pdf_path = request.json.get('pdf_path')
     if not pdf_path:

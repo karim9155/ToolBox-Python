@@ -2,9 +2,11 @@ FROM mcr.microsoft.com/playwright/python:v1.41.0-jammy
 
 WORKDIR /code
 
-# Install system dependencies for OpenCV if needed (headless usually doesn't need much but good to be safe)
+# Install system dependencies for OpenCV, ffmpeg, and Tesseract
 RUN apt-get update && apt-get install -y \
     libgl1-mesa-glx \
+    ffmpeg \
+    tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

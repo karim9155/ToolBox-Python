@@ -202,7 +202,8 @@ def create_single_slide_video(image_path: str,
     if result.returncode != 0:
         logger.error("❌ ffmpeg failed for slide")
         logger.error(result.stderr)
-        raise RuntimeError(f"ffmpeg error (code {result.returncode}) for {output_path}")
+        raise RuntimeError(f"ffmpeg error (code {result.returncode}) for {output_path}: {result.stderr}")
+
 
 def concat_videos(video_paths: List[str], output_path: str):
     """

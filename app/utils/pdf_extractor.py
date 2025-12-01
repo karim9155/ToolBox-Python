@@ -31,7 +31,7 @@ except ImportError as e:
     print("WARNING: Also install Tesseract-OCR from: https://github.com/UB-Mannheim/tesseract/wiki", file=sys.stderr)
 
 
-def extract_images_from_pdf(pdf_path, output_dir):
+def extract_images_from_pdf(pdf_path, output_dir=None, return_base64=False):
     """Extract all images and text from a PDF file and save them."""
     try:
         # Open the PDF
@@ -89,22 +89,29 @@ def extract_images_from_pdf(pdf_path, output_dir):
                     image_bytes = base_image["image"]
                     image_ext = base_image["ext"]  # png, jpg, etc.
                     
-                    # Save image to output directory
                     image_filename = f"image-{image_index}.{image_ext}"
-                    image_path = os.path.join(output_dir, image_filename)
+                    image_path = ""
                     
-                    with open(image_path, "wb") as img_file:
-                        img_file.write(image_bytes)
+                    # Save image to output directory if provided
+                    if output_dir:
+                        image_path = os.path.join(output_dir, image_filename)
+                        with open(image_path, "wb") as img_file:
+                            img_file.write(image_bytes)
                     
-                    # Add to results (page_num + 1 because pages are 1-indexed for users)
-                    images.append({
+                    image_data = {
                         "index": image_index,
                         "filename": image_filename,
                         "path": image_path,
                         "mimeType": f"image/{image_ext}",
                         "size": len(image_bytes),
                         "pageNumber": page_num + 1
-                    })
+                    }
+                    
+                    if return_base64:
+                        image_data["base64"] = base64.b64encode(image_bytes).decode('utf-8')
+                    
+                    # Add to results (page_num + 1 because pages are 1-indexed for users)
+                    images.append(image_data)
                     
                     image_index += 1
                     
@@ -125,16 +132,14 @@ def extract_images_from_pdf(pdf_path, output_dir):
             "texts": texts
         }
         
-        print(json.dumps(result))
-        return 0
+        return result
         
     except Exception as e:
         error_result = {
             "success": False,
             "error": str(e)
         }
-        print(json.dumps(error_result))
-        return 1
+        return error_result
 
 
 if __name__ == "__main__":
@@ -148,4 +153,10 @@ if __name__ == "__main__":
     # Create output directory if it doesn't exist
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
-    sys.exit(extract_images_from_pdf(pdf_path, output_dir))
+    result = extract_images_from_pdf(pdf_path, output_dir)
+    print(json.dumps(result))
+    
+    if result.get("success"):
+        sys.exit(0)
+    else:
+        sys.exit(1)

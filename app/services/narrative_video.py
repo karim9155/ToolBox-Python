@@ -114,6 +114,9 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
     os.makedirs(audio_dir, exist_ok=True)
     page_to_info = {}
     logs = []
+    
+    # Fallback voices to try if the primary one fails
+    fallback_voices = ["fr-FR-DeniseNeural", "en-US-AriaNeural"]
 
     # Handle nested structure if present (e.g. [{"data": [...]}] or just [...])
     data_list = voice_data
@@ -123,6 +126,7 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
         data_list = voice_data["data"]
     
     logs.append(f"Processing {len(data_list)} items from voice_data.")
+    logs.append(f"Edge-TTS version: {edge_tts.__version__}")
 
     for item in data_list:
         if not isinstance(item, dict):
@@ -138,56 +142,72 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
         audio_path = os.path.join(audio_dir, f"page_{page_num:03d}.mp3")
 
         logger.info(f"🔊 Edge-TTS page {page_num} ...")
-        try:
-            if not text or not text.strip():
-                msg = f"⚠️ Empty text for page {page_num}, skipping TTS."
-                logger.warning(msg)
-                logs.append(msg)
-                raise ValueError("Empty text")
-
-            communicate = edge_tts.Communicate(text, voice)
-            await communicate.save(audio_path)
-
-            # Verify file size
-            if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
-                msg = f"❌ Generated audio file for page {page_num} is empty or missing."
-                logger.error(msg)
-                logs.append(msg)
-                raise RuntimeError("Empty audio file generated")
-
-            # Check if file is actually an error message (text)
+        
+        # Try primary voice, then fallbacks
+        voices_to_try = [voice] + fallback_voices
+        success = False
+        last_error = None
+        
+        for current_voice in voices_to_try:
             try:
-                with open(audio_path, 'rb') as f:
-                    header = f.read(1024)
-                    try:
-                        text_content = header.decode('utf-8')
-                        # Common error signatures from web APIs
-                        if "403 Forbidden" in text_content or "Error" in text_content or "<html>" in text_content or "Too Many Requests" in text_content:
-                            msg = f"❌ Edge-TTS returned an error text instead of audio: {text_content}"
-                            logger.error(msg)
-                            logs.append(msg)
-                            raise RuntimeError(f"Edge-TTS API Error: {text_content[:200]}")
-                    except UnicodeDecodeError:
-                        # Binary file, likely audio
-                        pass
+                if not text or not text.strip():
+                    msg = f"⚠️ Empty text for page {page_num}, skipping TTS."
+                    logger.warning(msg)
+                    logs.append(msg)
+                    raise ValueError("Empty text")
+                
+                # Log truncated text for debugging
+                logs.append(f"Page {page_num} text ({len(text)} chars): {text[:50]}...")
+
+                communicate = edge_tts.Communicate(text, current_voice)
+                await communicate.save(audio_path)
+
+                # Verify file size
+                if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
+                    msg = f"❌ Generated audio file for page {page_num} is empty or missing."
+                    logger.error(msg)
+                    # logs.append(msg) # Don't log yet, try next voice
+                    raise RuntimeError("Empty audio file generated")
+
+                # Check if file is actually an error message (text)
+                try:
+                    with open(audio_path, 'rb') as f:
+                        header = f.read(1024)
+                        try:
+                            text_content = header.decode('utf-8')
+                            # Common error signatures from web APIs
+                            if "403 Forbidden" in text_content or "Error" in text_content or "<html>" in text_content or "Too Many Requests" in text_content:
+                                msg = f"❌ Edge-TTS returned an error text instead of audio: {text_content}"
+                                logger.error(msg)
+                                raise RuntimeError(f"Edge-TTS API Error: {text_content[:200]}")
+                        except UnicodeDecodeError:
+                            # Binary file, likely audio
+                            pass
+                except Exception as e:
+                    if "Edge-TTS API Error" in str(e):
+                        raise e
+                    logger.error(f"Error checking file header: {e}")
+
+                duration = get_audio_duration(audio_path)
+                if duration is None:
+                    msg = f"❌ Invalid audio file (ffprobe failed) for page {page_num}"
+                    # logs.append(msg)
+                    raise RuntimeError("Invalid audio file (ffprobe failed)")
+                
+                logs.append(f"✅ Generated audio for page {page_num} using {current_voice} ({duration}s)")
+                
+                # Small delay to avoid rate limits
+                await asyncio.sleep(0.5)
+                success = True
+                break # Exit retry loop if successful
+
             except Exception as e:
-                if "Edge-TTS API Error" in str(e):
-                    raise e
-                logger.error(f"Error checking file header: {e}")
-
-            duration = get_audio_duration(audio_path)
-            if duration is None:
-                msg = f"❌ Invalid audio file (ffprobe failed) for page {page_num}"
-                logs.append(msg)
-                raise RuntimeError("Invalid audio file (ffprobe failed)")
-            
-            logs.append(f"✅ Generated audio for page {page_num} ({duration}s)")
-            
-            # Small delay to avoid rate limits
-            await asyncio.sleep(0.5)
-
-        except Exception as e:
-            msg = f"Error generating TTS for page {page_num}: {e}"
+                last_error = e
+                logs.append(f"⚠️ Failed with voice {current_voice}: {e}")
+                await asyncio.sleep(1.0) # Wait a bit before retry
+        
+        if not success:
+            msg = f"❌ All voices failed for page {page_num}. Last error: {last_error}"
             logger.error(msg)
             logs.append(msg)
             duration = 5.0 # Fallback

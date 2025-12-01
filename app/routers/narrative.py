@@ -7,6 +7,7 @@ import json
 import zipfile
 from typing import List
 from app.services.narrative_video import process_pdf_with_voice
+import edge_tts
 
 router = APIRouter()
 
@@ -15,6 +16,48 @@ def cleanup_temp_dir(path: str):
         shutil.rmtree(path)
     except Exception as e:
         print(f"Error cleaning up {path}: {e}")
+
+@router.get("/test-tts", tags=["Video"])
+async def test_tts_endpoint():
+    """
+    Test endpoint to verify if Edge-TTS is working on the server.
+    """
+    logs = []
+    logs.append(f"Edge-TTS version: {edge_tts.__version__}")
+    
+    # 1. List voices
+    try:
+        voices = await edge_tts.list_voices()
+        french_voices = [v['ShortName'] for v in voices if "fr-FR" in v['ShortName']]
+        logs.append(f"Found {len(voices)} voices. French voices: {french_voices}")
+    except Exception as e:
+        logs.append(f"❌ Failed to list voices: {e}")
+
+    # 2. Try to generate audio
+    temp_dir = tempfile.mkdtemp()
+    audio_path = os.path.join(temp_dir, "test.mp3")
+    voice = "fr-FR-HenriNeural"
+    text = "Ceci est un test de synthèse vocale."
+    
+    try:
+        logs.append(f"Attempting to generate audio with {voice}...")
+        communicate = edge_tts.Communicate(text, voice)
+        await communicate.save(audio_path)
+        
+        if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
+            logs.append("✅ Audio generated successfully.")
+            # Clean up
+            shutil.rmtree(temp_dir)
+            return {"status": "success", "logs": logs}
+        else:
+            logs.append("❌ Audio file is empty or missing.")
+            shutil.rmtree(temp_dir)
+            return {"status": "failed", "logs": logs}
+            
+    except Exception as e:
+        logs.append(f"❌ TTS Generation failed: {e}")
+        shutil.rmtree(temp_dir)
+        return {"status": "error", "logs": logs}
 
 @router.post("/generate-narrative", tags=["Video"])
 async def generate_narrative_video(

@@ -38,6 +38,7 @@ def get_audio_duration(audio_path: str) -> float:
 
         if result.returncode != 0 or not result.stdout.strip():
             logger.warning(f"⚠️ Impossible to retrieve duration for {audio_path}, defaulting to None.")
+            logger.warning(f"ffprobe stderr: {result.stderr}")
             return None
 
         return float(result.stdout.strip())
@@ -145,9 +146,30 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
                 logger.error(f"❌ Generated audio file for page {page_num} is empty or missing.")
                 raise RuntimeError("Empty audio file generated")
 
+            # Check if file is actually an error message (text)
+            try:
+                with open(audio_path, 'rb') as f:
+                    header = f.read(1024)
+                    try:
+                        text_content = header.decode('utf-8')
+                        # Common error signatures from web APIs
+                        if "403 Forbidden" in text_content or "Error" in text_content or "<html>" in text_content or "Too Many Requests" in text_content:
+                            logger.error(f"❌ Edge-TTS returned an error text instead of audio: {text_content}")
+                            raise RuntimeError(f"Edge-TTS API Error: {text_content[:200]}")
+                    except UnicodeDecodeError:
+                        # Binary file, likely audio
+                        pass
+            except Exception as e:
+                if "Edge-TTS API Error" in str(e):
+                    raise e
+                logger.error(f"Error checking file header: {e}")
+
             duration = get_audio_duration(audio_path)
             if duration is None:
                 raise RuntimeError("Invalid audio file (ffprobe failed)")
+            
+            # Small delay to avoid rate limits
+            await asyncio.sleep(0.5)
 
         except Exception as e:
             logger.error(f"Error generating TTS for page {page_num}: {e}")

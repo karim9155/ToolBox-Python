@@ -111,7 +111,14 @@ def generate_tts_audios(voice_data: List[Dict], audio_dir: str, lang: str = "fr"
     os.makedirs(audio_dir, exist_ok=True)
     page_to_info = {}
 
-    for item in voice_data:
+    # Handle nested structure if present (e.g. [{"data": [...]}] or just [...])
+    data_list = voice_data
+    if isinstance(voice_data, list) and len(voice_data) > 0 and "data" in voice_data[0]:
+        data_list = voice_data[0]["data"]
+    elif isinstance(voice_data, dict) and "data" in voice_data:
+        data_list = voice_data["data"]
+
+    for item in data_list:
         if not isinstance(item, dict):
             continue
         if "page_number" not in item or "voice_over" not in item:

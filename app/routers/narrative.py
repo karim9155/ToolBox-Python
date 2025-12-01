@@ -50,7 +50,7 @@ async def generate_narrative_video(
             shutil.copyfileobj(file.file, buffer)
             
         # Process
-        results = await process_pdf_with_voice(
+        results, logs = await process_pdf_with_voice(
             pdf_path=pdf_path,
             voice_data=voice_data,
             workdir=temp_dir,
@@ -68,6 +68,12 @@ async def generate_narrative_video(
                 video_path = res["video_path"]
                 arcname = os.path.basename(video_path)
                 zipf.write(video_path, arcname)
+            
+            # Add log report
+            report_path = os.path.join(temp_dir, "generation_report.txt")
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(logs))
+            zipf.write(report_path, "generation_report.txt")
         
         # Schedule cleanup after response
         background_tasks.add_task(cleanup_temp_dir, temp_dir)

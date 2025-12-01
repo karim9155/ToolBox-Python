@@ -106,12 +106,14 @@ def pdf_to_images(pdf_path: str, out_dir: str, dpi: int = 150) -> List[str]:
     return paths
 
 
-async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str = "fr-FR-HenriNeural") -> Dict[int, Dict]:
+async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str = "fr-FR-HenriNeural") -> tuple[Dict[int, Dict], List[str]]:
     """
     Generates MP3 for each slide using Edge-TTS.
+    Returns: (page_to_info_map, list_of_log_messages)
     """
     os.makedirs(audio_dir, exist_ok=True)
     page_to_info = {}
+    logs = []
 
     # Handle nested structure if present (e.g. [{"data": [...]}] or just [...])
     data_list = voice_data
@@ -119,11 +121,14 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
         data_list = voice_data[0]["data"]
     elif isinstance(voice_data, dict) and "data" in voice_data:
         data_list = voice_data["data"]
+    
+    logs.append(f"Processing {len(data_list)} items from voice_data.")
 
     for item in data_list:
         if not isinstance(item, dict):
             continue
         if "page_number" not in item or "voice_over" not in item:
+            logs.append(f"Skipping item without page_number or voice_over: {item}")
             continue
 
         page_num = int(item["page_number"])
@@ -135,7 +140,9 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
         logger.info(f"🔊 Edge-TTS page {page_num} ...")
         try:
             if not text or not text.strip():
-                logger.warning(f"⚠️ Empty text for page {page_num}, skipping TTS.")
+                msg = f"⚠️ Empty text for page {page_num}, skipping TTS."
+                logger.warning(msg)
+                logs.append(msg)
                 raise ValueError("Empty text")
 
             communicate = edge_tts.Communicate(text, voice)
@@ -143,7 +150,9 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
 
             # Verify file size
             if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
-                logger.error(f"❌ Generated audio file for page {page_num} is empty or missing.")
+                msg = f"❌ Generated audio file for page {page_num} is empty or missing."
+                logger.error(msg)
+                logs.append(msg)
                 raise RuntimeError("Empty audio file generated")
 
             # Check if file is actually an error message (text)
@@ -154,7 +163,9 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
                         text_content = header.decode('utf-8')
                         # Common error signatures from web APIs
                         if "403 Forbidden" in text_content or "Error" in text_content or "<html>" in text_content or "Too Many Requests" in text_content:
-                            logger.error(f"❌ Edge-TTS returned an error text instead of audio: {text_content}")
+                            msg = f"❌ Edge-TTS returned an error text instead of audio: {text_content}"
+                            logger.error(msg)
+                            logs.append(msg)
                             raise RuntimeError(f"Edge-TTS API Error: {text_content[:200]}")
                     except UnicodeDecodeError:
                         # Binary file, likely audio
@@ -166,13 +177,19 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
 
             duration = get_audio_duration(audio_path)
             if duration is None:
+                msg = f"❌ Invalid audio file (ffprobe failed) for page {page_num}"
+                logs.append(msg)
                 raise RuntimeError("Invalid audio file (ffprobe failed)")
+            
+            logs.append(f"✅ Generated audio for page {page_num} ({duration}s)")
             
             # Small delay to avoid rate limits
             await asyncio.sleep(0.5)
 
         except Exception as e:
-            logger.error(f"Error generating TTS for page {page_num}: {e}")
+            msg = f"Error generating TTS for page {page_num}: {e}"
+            logger.error(msg)
+            logs.append(msg)
             duration = 5.0 # Fallback
             audio_path = None # Ensure we don't pass a bad path to ffmpeg
 
@@ -182,7 +199,7 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
             "title": title,
         }
 
-    return page_to_info
+    return page_to_info, logs
 
 def create_single_slide_video(image_path: str,
                               audio_path: str,
@@ -294,11 +311,13 @@ async def process_pdf_with_voice(pdf_path: str,
                            voice_data: List[Dict],
                            workdir: str,
                            min_sections: int = 3,
-                           default_duration: float = 5.0) -> List[Dict]:
+                           default_duration: float = 5.0) -> tuple[List[Dict], List[str]]:
     """
     Main pipeline.
+    Returns (results, logs)
     """
     os.makedirs(workdir, exist_ok=True)
+    logs = []
 
     # A. Number of pages
     pages = extract_page_texts(pdf_path)
@@ -306,6 +325,7 @@ async def process_pdf_with_voice(pdf_path: str,
         raise ValueError("The PDF contains no readable pages.")
     num_pages = len(pages)
     logger.info(f"📄 Number of pages : {num_pages}")
+    logs.append(f"PDF loaded with {num_pages} pages.")
 
     segments = build_uniform_segments(num_pages, min_sections=min_sections)
     logger.info(f"📦 Segments : {segments}")
@@ -313,10 +333,12 @@ async def process_pdf_with_voice(pdf_path: str,
     # B. PDF -> images
     img_dir = os.path.join(workdir, "images_tmp")
     image_paths = pdf_to_images(pdf_path, img_dir)
+    logs.append(f"Converted PDF to {len(image_paths)} images.")
 
     # C. Generate TTS audios
     audio_dir = os.path.join(workdir, "audio_tmp")
-    page_to_info = await generate_tts_audios(voice_data, audio_dir, voice="fr-FR-HenriNeural")
+    page_to_info, tts_logs = await generate_tts_audios(voice_data, audio_dir, voice="fr-FR-HenriNeural")
+    logs.extend(tts_logs)
 
     # D. Build videos
     slide_video_dir = os.path.join(workdir, "slides_tmp")
@@ -345,31 +367,37 @@ async def process_pdf_with_voice(pdf_path: str,
             else:
                 audio_path = None
                 duration = default_duration
+                logs.append(f"⚠️ No audio info for page {p}, using silent default.")
 
             slide_video_path = os.path.join(
                 slide_video_dir,
                 f"segment{seg['index']:02d}_page{p:03d}.mp4"
             )
 
-            create_single_slide_video(
-                image_path=img_path,
-                audio_path=audio_path,
-                duration=duration,
-                output_path=slide_video_path
-            )
-
-            segment_slide_videos.append(slide_video_path)
+            try:
+                create_single_slide_video(
+                    image_path=img_path,
+                    audio_path=audio_path,
+                    duration=duration,
+                    output_path=slide_video_path
+                )
+                segment_slide_videos.append(slide_video_path)
+            except Exception as e:
+                logs.append(f"❌ Failed to create video for page {p}: {e}")
 
         # Concat segment
         if segment_slide_videos:
             final_segment_path = os.path.join(workdir, f"part_{seg['index']:02d}.mp4")
-            concat_videos(segment_slide_videos, final_segment_path)
+            try:
+                concat_videos(segment_slide_videos, final_segment_path)
 
-            results.append({
-                "index": seg["index"],
-                "pages": pages_numbers,
-                "video_path": final_segment_path
-            })
+                results.append({
+                    "index": seg["index"],
+                    "pages": pages_numbers,
+                    "video_path": final_segment_path
+                })
+            except Exception as e:
+                logs.append(f"❌ Failed to concat segment {seg['index']}: {e}")
 
     # E. Cleanup
     # We might want to keep the final videos, but clean up intermediates
@@ -378,5 +406,5 @@ async def process_pdf_with_voice(pdf_path: str,
     shutil.rmtree(slide_video_dir, ignore_errors=True)
     logger.info("\n🧹 Temporary files removed.")
 
-    return results
+    return results, logs
 

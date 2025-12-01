@@ -159,6 +159,8 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
                 # Log truncated text for debugging
                 logs.append(f"Page {page_num} text ({len(text)} chars): {text[:50]}...")
 
+                # Use a proxy if available (optional, for future use)
+                # communicate = edge_tts.Communicate(text, current_voice, proxy="http://...")
                 communicate = edge_tts.Communicate(text, current_voice)
                 await communicate.save(audio_path)
 
@@ -180,11 +182,18 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
                                 msg = f"❌ Edge-TTS returned an error text instead of audio: {text_content}"
                                 logger.error(msg)
                                 raise RuntimeError(f"Edge-TTS API Error: {text_content[:200]}")
+                            
+                            # Also check for "No audio was received" which is a specific edge-tts library error message
+                            if "No audio was received" in text_content:
+                                msg = f"❌ Edge-TTS library error: {text_content}"
+                                logger.error(msg)
+                                raise RuntimeError(f"Edge-TTS Library Error: {text_content}")
+
                         except UnicodeDecodeError:
                             # Binary file, likely audio
                             pass
                 except Exception as e:
-                    if "Edge-TTS API Error" in str(e):
+                    if "Edge-TTS" in str(e):
                         raise e
                     logger.error(f"Error checking file header: {e}")
 
@@ -197,14 +206,14 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
                 logs.append(f"✅ Generated audio for page {page_num} using {current_voice} ({duration}s)")
                 
                 # Small delay to avoid rate limits
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.0) # Increased delay
                 success = True
                 break # Exit retry loop if successful
 
             except Exception as e:
                 last_error = e
                 logs.append(f"⚠️ Failed with voice {current_voice}: {e}")
-                await asyncio.sleep(1.0) # Wait a bit before retry
+                await asyncio.sleep(2.0) # Increased wait before retry
         
         if not success:
             msg = f"❌ All voices failed for page {page_num}. Last error: {last_error}"

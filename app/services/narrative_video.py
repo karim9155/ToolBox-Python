@@ -37,13 +37,13 @@ def get_audio_duration(audio_path: str) -> float:
         )
 
         if result.returncode != 0 or not result.stdout.strip():
-            logger.warning(f"⚠️ Impossible to retrieve duration for {audio_path}, defaulting to 5s.")
-            return 5.0
+            logger.warning(f"⚠️ Impossible to retrieve duration for {audio_path}, defaulting to None.")
+            return None
 
         return float(result.stdout.strip())
     except Exception as e:
         logger.error(f"⚠️ Error getting duration for {audio_path}: {e}")
-        return 5.0
+        return None
 
 def extract_page_texts(pdf_path: str) -> List[Dict]:
     pages = []
@@ -133,12 +133,26 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
 
         logger.info(f"🔊 Edge-TTS page {page_num} ...")
         try:
+            if not text or not text.strip():
+                logger.warning(f"⚠️ Empty text for page {page_num}, skipping TTS.")
+                raise ValueError("Empty text")
+
             communicate = edge_tts.Communicate(text, voice)
             await communicate.save(audio_path)
+
+            # Verify file size
+            if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
+                logger.error(f"❌ Generated audio file for page {page_num} is empty or missing.")
+                raise RuntimeError("Empty audio file generated")
+
             duration = get_audio_duration(audio_path)
+            if duration is None:
+                raise RuntimeError("Invalid audio file (ffprobe failed)")
+
         except Exception as e:
             logger.error(f"Error generating TTS for page {page_num}: {e}")
             duration = 5.0 # Fallback
+            audio_path = None # Ensure we don't pass a bad path to ffmpeg
 
         page_to_info[page_num] = {
             "audio_path": audio_path,

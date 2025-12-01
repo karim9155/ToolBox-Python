@@ -5,10 +5,11 @@ import subprocess
 import json
 from typing import List, Dict
 import logging
+import asyncio
 
 import pdfplumber
 import fitz  # PyMuPDF
-from gtts import gTTS
+import edge_tts
 
 logger = logging.getLogger(__name__)
 
@@ -104,9 +105,9 @@ def pdf_to_images(pdf_path: str, out_dir: str, dpi: int = 150) -> List[str]:
     return paths
 
 
-def generate_tts_audios(voice_data: List[Dict], audio_dir: str, lang: str = "fr") -> Dict[int, Dict]:
+async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str = "fr-FR-HenriNeural") -> Dict[int, Dict]:
     """
-    Generates MP3 for each slide using gTTS.
+    Generates MP3 for each slide using Edge-TTS.
     """
     os.makedirs(audio_dir, exist_ok=True)
     page_to_info = {}
@@ -130,10 +131,10 @@ def generate_tts_audios(voice_data: List[Dict], audio_dir: str, lang: str = "fr"
 
         audio_path = os.path.join(audio_dir, f"page_{page_num:03d}.mp3")
 
-        logger.info(f"🔊 gTTS page {page_num} ...")
+        logger.info(f"🔊 Edge-TTS page {page_num} ...")
         try:
-            tts = gTTS(text=text, lang=lang)
-            tts.save(audio_path)
+            communicate = edge_tts.Communicate(text, voice)
+            await communicate.save(audio_path)
             duration = get_audio_duration(audio_path)
         except Exception as e:
             logger.error(f"Error generating TTS for page {page_num}: {e}")
@@ -252,7 +253,7 @@ def concat_videos(video_paths: List[str], output_path: str):
         logger.error(result.stderr)
         raise RuntimeError(f"ffmpeg concat error (code {result.returncode}) for {output_path}")
 
-def process_pdf_with_voice(pdf_path: str,
+async def process_pdf_with_voice(pdf_path: str,
                            voice_data: List[Dict],
                            workdir: str,
                            min_sections: int = 3,
@@ -278,7 +279,7 @@ def process_pdf_with_voice(pdf_path: str,
 
     # C. Generate TTS audios
     audio_dir = os.path.join(workdir, "audio_tmp")
-    page_to_info = generate_tts_audios(voice_data, audio_dir, lang="fr")
+    page_to_info = await generate_tts_audios(voice_data, audio_dir, voice="fr-FR-HenriNeural")
 
     # D. Build videos
     slide_video_dir = os.path.join(workdir, "slides_tmp")
@@ -341,3 +342,4 @@ def process_pdf_with_voice(pdf_path: str,
     logger.info("\n🧹 Temporary files removed.")
 
     return results
+

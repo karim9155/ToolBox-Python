@@ -50,12 +50,13 @@ async def generate_narrative_video(
             shutil.copyfileobj(file.file, buffer)
             
         # Process
-        results = process_pdf_with_voice(
+        results = await process_pdf_with_voice(
             pdf_path=pdf_path,
             voice_data=voice_data,
             workdir=temp_dir,
             min_sections=3
         )
+
         
         if not results:
             raise HTTPException(status_code=500, detail="No videos were generated")

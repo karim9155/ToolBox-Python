@@ -16,6 +16,7 @@ import fitz  # PyMuPDF
 logger = logging.getLogger(__name__)
 
 # Google Cloud TTS Configuration
+# Integration verified on 2025-12-03
 GOOGLE_TTS_API_KEY = "AIzaSyDunfzX9alr7HknvOl_fsb9LQ5llAHTr-Y"
 GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
 

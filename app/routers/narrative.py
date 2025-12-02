@@ -6,8 +6,10 @@ import shutil
 import json
 import zipfile
 from typing import List
-from app.services.narrative_video import process_pdf_with_voice
-import edge_tts
+from app.services.narrative_video import process_pdf_with_voice, generate_google_tts
+import os
+import shutil
+import tempfile
 
 router = APIRouter()
 
@@ -20,29 +22,20 @@ def cleanup_temp_dir(path: str):
 @router.get("/test-tts", tags=["Video"])
 async def test_tts_endpoint():
     """
-    Test endpoint to verify if Edge-TTS is working on the server.
+    Test endpoint to verify if Google TTS is working on the server.
     """
     logs = []
-    logs.append(f"Edge-TTS version: {edge_tts.__version__}")
+    logs.append("Testing Google Cloud TTS...")
     
-    # 1. List voices
-    try:
-        voices = await edge_tts.list_voices()
-        french_voices = [v['ShortName'] for v in voices if "fr-FR" in v['ShortName']]
-        logs.append(f"Found {len(voices)} voices. French voices: {french_voices}")
-    except Exception as e:
-        logs.append(f"❌ Failed to list voices: {e}")
-
     # 2. Try to generate audio
     temp_dir = tempfile.mkdtemp()
     audio_path = os.path.join(temp_dir, "test.mp3")
-    voice = "fr-FR-HenriNeural"
-    text = "Ceci est un test de synthèse vocale."
+    voice = "fr-FR-Neural2-B"
+    text = "Ceci est un test de synthèse vocale Google."
     
     try:
         logs.append(f"Attempting to generate audio with {voice}...")
-        communicate = edge_tts.Communicate(text, voice)
-        await communicate.save(audio_path)
+        await generate_google_tts(text, audio_path, voice_name=voice)
         
         if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
             logs.append("✅ Audio generated successfully.")

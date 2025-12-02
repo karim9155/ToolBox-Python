@@ -6,12 +6,18 @@ import json
 from typing import List, Dict
 import logging
 import asyncio
+import requests
+import base64
 
 import pdfplumber
 import fitz  # PyMuPDF
-import edge_tts
+# import edge_tts # Removed in favor of Google TTS
 
 logger = logging.getLogger(__name__)
+
+# Google Cloud TTS Configuration
+GOOGLE_TTS_API_KEY = "AIzaSyDunfzX9alr7HknvOl_fsb9LQ5llAHTr-Y"
+GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
 
 def get_audio_duration(audio_path: str) -> float:
     """
@@ -106,18 +112,45 @@ def pdf_to_images(pdf_path: str, out_dir: str, dpi: int = 150) -> List[str]:
     return paths
 
 
-async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str = "fr-FR-HenriNeural") -> tuple[Dict[int, Dict], List[str]]:
+async def generate_google_tts(text: str, output_path: str, language_code: str = "fr-FR", voice_name: str = "fr-FR-Neural2-B"):
     """
-    Generates MP3 for each slide using Edge-TTS.
+    Generates audio using Google Cloud Text-to-Speech API.
+    """
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+    data = {
+        "input": {"text": text},
+        "voice": {"languageCode": language_code, "name": voice_name},
+        "audioConfig": {"audioEncoding": "MP3"}
+    }
+    params = {"key": GOOGLE_TTS_API_KEY}
+
+    def _request():
+        return requests.post(GOOGLE_TTS_URL, headers=headers, json=data, params=params)
+
+    # Run blocking request in a separate thread
+    response = await asyncio.to_thread(_request)
+
+    if response.status_code == 200:
+        response_json = response.json()
+        audio_content = response_json.get("audioContent")
+        if audio_content:
+            with open(output_path, "wb") as f:
+                f.write(base64.b64decode(audio_content))
+            return True
+        else:
+            raise RuntimeError("No audio content in Google TTS response")
+    else:
+        raise RuntimeError(f"Google TTS API Error ({response.status_code}): {response.text}")
+
+async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str = "fr-FR-Neural2-B") -> tuple[Dict[int, Dict], List[str]]:
+    """
+    Generates MP3 for each slide using Google Cloud TTS.
     Returns: (page_to_info_map, list_of_log_messages)
     """
     os.makedirs(audio_dir, exist_ok=True)
     page_to_info = {}
     logs = []
     
-    # Fallback voices to try if the primary one fails
-    fallback_voices = ["fr-FR-DeniseNeural", "en-US-AriaNeural"]
-
     # Handle nested structure if present (e.g. [{"data": [...]}] or just [...])
     data_list = voice_data
     if isinstance(voice_data, list) and len(voice_data) > 0 and "data" in voice_data[0]:
@@ -125,8 +158,7 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
     elif isinstance(voice_data, dict) and "data" in voice_data:
         data_list = voice_data["data"]
     
-    logs.append(f"Processing {len(data_list)} items from voice_data.")
-    logs.append(f"Edge-TTS version: {edge_tts.__version__}")
+    logs.append(f"Processing {len(data_list)} items from voice_data using Google TTS.")
 
     for item in data_list:
         if not isinstance(item, dict):
@@ -141,82 +173,38 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
 
         audio_path = os.path.join(audio_dir, f"page_{page_num:03d}.mp3")
 
-        logger.info(f"🔊 Edge-TTS page {page_num} ...")
+        logger.info(f"🔊 Google TTS page {page_num} ...")
         
-        # Try primary voice, then fallbacks
-        voices_to_try = [voice] + fallback_voices
-        success = False
-        last_error = None
-        
-        for current_voice in voices_to_try:
-            try:
-                if not text or not text.strip():
-                    msg = f"⚠️ Empty text for page {page_num}, skipping TTS."
-                    logger.warning(msg)
-                    logs.append(msg)
-                    raise ValueError("Empty text")
-                
-                # Log truncated text for debugging
-                logs.append(f"Page {page_num} text ({len(text)} chars): {text[:50]}...")
+        try:
+            if not text or not text.strip():
+                msg = f"⚠️ Empty text for page {page_num}, skipping TTS."
+                logger.warning(msg)
+                logs.append(msg)
+                raise ValueError("Empty text")
+            
+            # Log truncated text for debugging
+            logs.append(f"Page {page_num} text ({len(text)} chars): {text[:50]}...")
 
-                # Use a proxy if available (optional, for future use)
-                # communicate = edge_tts.Communicate(text, current_voice, proxy="http://...")
-                communicate = edge_tts.Communicate(text, current_voice)
-                await communicate.save(audio_path)
+            await generate_google_tts(text, audio_path, voice_name=voice)
 
-                # Verify file size
-                if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
-                    msg = f"❌ Generated audio file for page {page_num} is empty or missing."
-                    logger.error(msg)
-                    # logs.append(msg) # Don't log yet, try next voice
-                    raise RuntimeError("Empty audio file generated")
+            # Verify file size
+            if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
+                msg = f"❌ Generated audio file for page {page_num} is empty or missing."
+                logger.error(msg)
+                raise RuntimeError("Empty audio file generated")
 
-                # Check if file is actually an error message (text)
-                try:
-                    with open(audio_path, 'rb') as f:
-                        header = f.read(1024)
-                        try:
-                            text_content = header.decode('utf-8')
-                            # Common error signatures from web APIs
-                            if "403 Forbidden" in text_content or "Error" in text_content or "<html>" in text_content or "Too Many Requests" in text_content:
-                                msg = f"❌ Edge-TTS returned an error text instead of audio: {text_content}"
-                                logger.error(msg)
-                                raise RuntimeError(f"Edge-TTS API Error: {text_content[:200]}")
-                            
-                            # Also check for "No audio was received" which is a specific edge-tts library error message
-                            if "No audio was received" in text_content:
-                                msg = f"❌ Edge-TTS library error: {text_content}"
-                                logger.error(msg)
-                                raise RuntimeError(f"Edge-TTS Library Error: {text_content}")
+            duration = get_audio_duration(audio_path)
+            if duration is None:
+                msg = f"❌ Invalid audio file (ffprobe failed) for page {page_num}"
+                raise RuntimeError("Invalid audio file (ffprobe failed)")
+            
+            logs.append(f"✅ Generated audio for page {page_num} using {voice} ({duration}s)")
+            
+            # Small delay to be nice to the API (though Google handles high throughput)
+            await asyncio.sleep(0.1)
 
-                        except UnicodeDecodeError:
-                            # Binary file, likely audio
-                            pass
-                except Exception as e:
-                    if "Edge-TTS" in str(e):
-                        raise e
-                    logger.error(f"Error checking file header: {e}")
-
-                duration = get_audio_duration(audio_path)
-                if duration is None:
-                    msg = f"❌ Invalid audio file (ffprobe failed) for page {page_num}"
-                    # logs.append(msg)
-                    raise RuntimeError("Invalid audio file (ffprobe failed)")
-                
-                logs.append(f"✅ Generated audio for page {page_num} using {current_voice} ({duration}s)")
-                
-                # Small delay to avoid rate limits
-                await asyncio.sleep(1.0) # Increased delay
-                success = True
-                break # Exit retry loop if successful
-
-            except Exception as e:
-                last_error = e
-                logs.append(f"⚠️ Failed with voice {current_voice}: {e}")
-                await asyncio.sleep(2.0) # Increased wait before retry
-        
-        if not success:
-            msg = f"❌ All voices failed for page {page_num}. Last error: {last_error}"
+        except Exception as e:
+            msg = f"❌ Failed to generate TTS for page {page_num}: {e}"
             logger.error(msg)
             logs.append(msg)
             duration = 5.0 # Fallback
@@ -366,7 +354,7 @@ async def process_pdf_with_voice(pdf_path: str,
 
     # C. Generate TTS audios
     audio_dir = os.path.join(workdir, "audio_tmp")
-    page_to_info, tts_logs = await generate_tts_audios(voice_data, audio_dir, voice="fr-FR-HenriNeural")
+    page_to_info, tts_logs = await generate_tts_audios(voice_data, audio_dir, voice="fr-FR-Neural2-B")
     logs.extend(tts_logs)
 
     # D. Build videos

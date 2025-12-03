@@ -56,7 +56,8 @@ async def test_tts_endpoint():
 async def generate_narrative_video(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    script: str = Form(..., description="JSON string containing the voice data script")
+    script: str = Form(..., description="JSON string containing the voice data script"),
+    language: str = Form("fr-FR", description="Language code for TTS (e.g., en-US, fr-FR, es-ES)")
 ):
     """
     Generate narrative videos from a PDF and a script.
@@ -90,7 +91,8 @@ async def generate_narrative_video(
             pdf_path=pdf_path,
             voice_data=voice_data,
             workdir=temp_dir,
-            min_sections=3
+            min_sections=3,
+            language_code=language
         )
 
         

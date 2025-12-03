@@ -20,6 +20,19 @@ logger = logging.getLogger(__name__)
 GOOGLE_TTS_API_KEY = os.getenv("GOOGLE_TTS_API_KEY")
 GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
 
+# Default voices for common languages
+DEFAULT_VOICES = {
+    "fr-FR": "fr-FR-Neural2-B",
+    "en-US": "en-US-Neural2-J",
+    "es-ES": "es-ES-Neural2-A",
+    "de-DE": "de-DE-Neural2-B",
+    "it-IT": "it-IT-Neural2-A",
+    "pt-BR": "pt-BR-Neural2-A",
+    "ja-JP": "ja-JP-Neural2-B",
+    "ko-KR": "ko-KR-Neural2-A",
+    "zh-CN": "cmn-CN-Wavenet-A", # Neural2 might not be available for all
+}
+
 def get_audio_duration(audio_path: str) -> float:
     """
     Returns the duration of the audio file (in seconds) using ffprobe.
@@ -146,7 +159,7 @@ async def generate_google_tts(text: str, output_path: str, language_code: str = 
     else:
         raise RuntimeError(f"Google TTS API Error ({response.status_code}): {response.text}")
 
-async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str = "fr-FR-Neural2-B") -> tuple[Dict[int, Dict], List[str]]:
+async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_code: str = "fr-FR") -> tuple[Dict[int, Dict], List[str]]:
     """
     Generates MP3 for each slide using Google Cloud TTS.
     Returns: (page_to_info_map, list_of_log_messages)
@@ -155,6 +168,13 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
     page_to_info = {}
     logs = []
     
+    # Determine voice name from language code
+    voice_name = DEFAULT_VOICES.get(language_code)
+    if not voice_name:
+        # Fallback heuristic or default to English if unknown
+        voice_name = f"{language_code}-Neural2-A"
+        logs.append(f"⚠️ Unknown language {language_code}, trying fallback voice {voice_name}")
+
     # Handle nested structure if present (e.g. [{"data": [...]}] or just [...])
     data_list = voice_data
     if isinstance(voice_data, list) and len(voice_data) > 0 and "data" in voice_data[0]:
@@ -162,7 +182,7 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
     elif isinstance(voice_data, dict) and "data" in voice_data:
         data_list = voice_data["data"]
     
-    logs.append(f"Processing {len(data_list)} items from voice_data using Google TTS.")
+    logs.append(f"Processing {len(data_list)} items from voice_data using Google TTS ({language_code} / {voice_name}).")
 
     for item in data_list:
         if not isinstance(item, dict):
@@ -189,7 +209,7 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
             # Log truncated text for debugging
             logs.append(f"Page {page_num} text ({len(text)} chars): {text[:50]}...")
 
-            await generate_google_tts(text, audio_path, voice_name=voice)
+            await generate_google_tts(text, audio_path, language_code=language_code, voice_name=voice_name)
 
             # Verify file size
             if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
@@ -202,7 +222,7 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, voice: str
                 msg = f"❌ Invalid audio file (ffprobe failed) for page {page_num}"
                 raise RuntimeError("Invalid audio file (ffprobe failed)")
             
-            logs.append(f"✅ Generated audio for page {page_num} using {voice} ({duration}s)")
+            logs.append(f"✅ Generated audio for page {page_num} using {voice_name} ({duration}s)")
             
             # Small delay to be nice to the API (though Google handles high throughput)
             await asyncio.sleep(0.1)
@@ -332,7 +352,8 @@ async def process_pdf_with_voice(pdf_path: str,
                            voice_data: List[Dict],
                            workdir: str,
                            min_sections: int = 3,
-                           default_duration: float = 5.0) -> tuple[List[Dict], List[str]]:
+                           default_duration: float = 5.0,
+                           language_code: str = "fr-FR") -> tuple[List[Dict], List[str]]:
     """
     Main pipeline.
     Returns (results, logs)
@@ -358,7 +379,7 @@ async def process_pdf_with_voice(pdf_path: str,
 
     # C. Generate TTS audios
     audio_dir = os.path.join(workdir, "audio_tmp")
-    page_to_info, tts_logs = await generate_tts_audios(voice_data, audio_dir, voice="fr-FR-Neural2-B")
+    page_to_info, tts_logs = await generate_tts_audios(voice_data, audio_dir, language_code=language_code)
     logs.extend(tts_logs)
 
     # D. Build videos

@@ -16,8 +16,8 @@ import fitz  # PyMuPDF
 logger = logging.getLogger(__name__)
 
 # Google Cloud TTS Configuration
-# Integration verified on 2025-12-03
-GOOGLE_TTS_API_KEY = "AIzaSyDunfzX9alr7HknvOl_fsb9LQ5llAHTr-Y"
+# Key is now loaded from environment variable for security
+GOOGLE_TTS_API_KEY = os.getenv("GOOGLE_TTS_API_KEY")
 GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
 
 def get_audio_duration(audio_path: str) -> float:
@@ -124,6 +124,9 @@ async def generate_google_tts(text: str, output_path: str, language_code: str = 
         "audioConfig": {"audioEncoding": "MP3"}
     }
     params = {"key": GOOGLE_TTS_API_KEY}
+
+    if not GOOGLE_TTS_API_KEY:
+        raise RuntimeError("GOOGLE_TTS_API_KEY environment variable is not set.")
 
     def _request():
         return requests.post(GOOGLE_TTS_URL, headers=headers, json=data, params=params)

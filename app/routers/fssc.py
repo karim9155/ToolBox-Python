@@ -1,25 +1,20 @@
+from fastapi import APIRouter, UploadFile, File, HTTPException
+from app.services.fssc_service import FSSCService
 
-from fastapi import APIRouter, HTTPException, UploadFile, File
-from app.services.fssc_service import extract_fssc
-import logging
+router = APIRouter(prefix="/extract/fssc", tags=["fssc"])
 
-logger = logging.getLogger("fssc_router")
-logging.basicConfig(level=logging.INFO)
+# Initialize service (singleton-like)
+fssc_service = FSSCService()
 
-router = APIRouter()
-
-@router.post('/extract/fssc')
-async def extract_fssc_endpoint(file: UploadFile = File(...)):
-    if not file:
-        logger.error("No file provided in request.")
-        raise HTTPException(status_code=400, detail="Missing file")
-    try:
-        logger.info(f"Received file: {file.filename}, content_type: {file.content_type}")
-        contents = await file.read()
-        logger.info(f"File size: {len(contents)} bytes")
-        result = extract_fssc(contents)
-        logger.info(f"Extraction result: {len(result)} nodes returned.")
-        return {'nodes': result}
-    except Exception as e:
-        logger.exception("Error during FSSC extraction")
-        raise HTTPException(status_code=500, detail=str(e))
+@router.post("/")
+async def extract_fssc_report(file: UploadFile = File(...)):
+    if not file.filename.lower().endswith(('.pdf', '.docx')):
+        raise HTTPException(status_code=400, detail="Only PDF and DOCX files are supported")
+    
+    content = await file.read()
+    result = fssc_service.process_file(content, file.filename)
+    
+    if result["status"] == "failed":
+        raise HTTPException(status_code=500, detail=result["error"])
+        
+    return result["output"]

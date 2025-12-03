@@ -47,4 +47,5 @@ jobs:
             --name toolbox-api \
             --restart unless-stopped \
             -e ASSEMBLYAI_API_KEY=${{ secrets.ASSEMBLYAI_API_KEY }} \
+            -e GOOGLE_TTS_API_KEY=${{ secrets.GOOGLE_TTS_API_KEY }} \
             karimkli/toolbox-api:latest

@@ -16,7 +16,7 @@ def root():
         "POST /last-frame": "multipart form-data field 'file' -> image/jpeg",
         "POST /transcribe": "multipart form-data field 'file' -> json/text",
         "POST /audit-time": "json body -> audit duration",
-        "POST /extract/fssc": "multipart form-data field 'file' -> zip/json",
+        "POST /extract/fssc": "multipart form-data field 'file' -> json",
         "POST /extract/pdf-images": "multipart form-data field 'file' -> json (with base64 images)",
         "POST /generate-narrative": "multipart form-data field 'file' (PDF) + 'script' (JSON) -> zip (videos)"
     }

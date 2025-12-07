@@ -4,6 +4,7 @@ import time
 import os
 from fastapi import APIRouter, File, UploadFile, HTTPException
 from fastapi.responses import Response
+from typing import Optional
 from app.utils.common import mmss
 
 router = APIRouter()
@@ -15,7 +16,7 @@ BASE = "https://api.assemblyai.com"
 HEADERS = {"authorization": API_KEY}
 
 @router.post("/transcribe", tags=["Audio"])
-def transcribe(file: UploadFile = File(...), lang: str = "fr", format: str = "json"):
+def transcribe(file: UploadFile = File(...), lang: Optional[str] = None, format: str = "json"):
     # Save to temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         # Read the file content synchronously
@@ -34,9 +35,13 @@ def transcribe(file: UploadFile = File(...), lang: str = "fr", format: str = "js
         payload = {
             "audio_url": audio_url,
             "speaker_labels": True,
-            "language_code": lang,
             "punctuate": True,
         }
+
+        if lang:
+            payload["language_code"] = lang
+        else:
+            payload["language_detection"] = True
         
         r = requests.post(f"{BASE}/v2/transcript", json=payload, headers=HEADERS)
         r.raise_for_status()

@@ -6,7 +6,7 @@ import shutil
 import json
 import zipfile
 from typing import List
-from app.services.narrative_video import process_media_with_voice, generate_google_tts
+from app.services.narrative_video import process_media_with_voice, process_image_collection, generate_google_tts
 import os
 import shutil
 import tempfile
@@ -55,25 +55,31 @@ async def test_tts_endpoint():
 @router.post("/generate-narrative", tags=["Video"])
 async def generate_narrative_video(
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(..., description="PDF or image files (PDF, JPG, PNG, GIF)"),
     script: str = Form(..., description="JSON string containing the voice data script"),
     language: str = Form("fr-FR", description="Language code for TTS (e.g., en-US, fr-FR, es-ES)")
 ):
     """
-    Generate narrative videos from a PDF or images and a script.
+    Generate narrative videos from PDF, images, or a collection of images and a script.
     Returns a ZIP file containing the generated video segments.
     
     Supported file types: PDF, JPG, JPEG, PNG, GIF
+    
+    You can provide:
+    - A single PDF file
+    - A single image file (JPG, PNG) or animated GIF
+    - Multiple image files (will be processed in order)
     
     The script should be a JSON array of objects with:
     - page_number: int
     - voice_over: str
     - slide_title: str (optional)
     """
-    # Validate file type
+    # Validate file types
     allowed_extensions = ('.pdf', '.jpg', '.jpeg', '.png', '.gif')
-    if not file.filename.lower().endswith(allowed_extensions):
-        raise HTTPException(status_code=400, detail=f"File must be one of: {', '.join(allowed_extensions)}")
+    for file in files:
+        if not file.filename.lower().endswith(allowed_extensions):
+            raise HTTPException(status_code=400, detail=f"File '{file.filename}' must be one of: {', '.join(allowed_extensions)}")
 
     try:
         voice_data = json.loads(script)
@@ -84,20 +90,41 @@ async def generate_narrative_video(
     temp_dir = tempfile.mkdtemp()
     
     try:
-        # Save uploaded file with original extension
-        file_ext = os.path.splitext(file.filename)[1].lower()
-        saved_file_path = os.path.join(temp_dir, f"input{file_ext}")
-        with open(saved_file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        # Handle single file vs multiple files
+        if len(files) == 1:
+            # Single file - could be PDF, image, or animated GIF
+            file = files[0]
+            file_ext = os.path.splitext(file.filename)[1].lower()
+            saved_file_path = os.path.join(temp_dir, f"input{file_ext}")
+            with open(saved_file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+                
+            # Process single media file
+            results, logs = await process_media_with_voice(
+                media_path=saved_file_path,
+                voice_data=voice_data,
+                workdir=temp_dir,
+                min_sections=3,
+                language_code=language
+            )
+        else:
+            # Multiple image files - save all and process as collection
+            saved_files = []
+            for idx, file in enumerate(files):
+                file_ext = os.path.splitext(file.filename)[1].lower()
+                saved_file_path = os.path.join(temp_dir, f"image_{idx+1:03d}{file_ext}")
+                with open(saved_file_path, "wb") as buffer:
+                    shutil.copyfileobj(file.file, buffer)
+                saved_files.append(saved_file_path)
             
-        # Process (handles both PDF and image files)
-        results, logs = await process_media_with_voice(
-            media_path=saved_file_path,
-            voice_data=voice_data,
-            workdir=temp_dir,
-            min_sections=3,
-            language_code=language
-        )
+            # Process multiple images as a collection
+            results, logs = await process_image_collection(
+                image_paths=saved_files,
+                voice_data=voice_data,
+                workdir=temp_dir,
+                min_sections=3,
+                language_code=language
+            )
 
         
         if not results:

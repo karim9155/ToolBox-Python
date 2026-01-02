@@ -8,6 +8,7 @@ import logging
 import asyncio
 import requests
 import base64
+from PIL import Image
 
 import pdfplumber
 import fitz  # PyMuPDF
@@ -124,6 +125,60 @@ def pdf_to_images(pdf_path: str, out_dir: str, dpi: int = 150) -> List[str]:
         raise RuntimeError(f"Failed to convert PDF to images: {e}")
 
     return paths
+
+
+def normalize_images(image_path: str, out_dir: str) -> List[str]:
+    """
+    Handles single image files (JPG, PNG, GIF).
+    If it's an animated GIF, extracts all frames.
+    Otherwise, just copies/converts the image to PNG.
+    Returns a list of PNG file paths.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    paths = []
+    
+    try:
+        img = Image.open(image_path)
+        
+        # Check if it's an animated GIF
+        if hasattr(img, 'n_frames') and img.n_frames > 1:
+            # Extract all frames from animated GIF
+            logger.info(f"Extracting {img.n_frames} frames from animated GIF")
+            for i in range(img.n_frames):
+                img.seek(i)
+                out_path = os.path.join(out_dir, f"page_{i+1:03d}.png")
+                img.convert("RGB").save(out_path, "PNG")
+                paths.append(out_path)
+        else:
+            # Single image file - convert to PNG
+            out_path = os.path.join(out_dir, f"page_001.png")
+            img.convert("RGB").save(out_path, "PNG")
+            paths.append(out_path)
+            
+    except Exception as e:
+        logger.error(f"Error processing image: {e}")
+        raise RuntimeError(f"Failed to process image: {e}")
+    
+    return paths
+
+
+def extract_images_from_directory(dir_path: str) -> List[str]:
+    """
+    If multiple image files are in a directory, extract them.
+    Useful for batch processing of multiple images.
+    Returns list of image paths sorted by filename.
+    """
+    supported_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')
+    image_files = []
+    
+    if not os.path.isdir(dir_path):
+        return []
+    
+    for filename in sorted(os.listdir(dir_path)):
+        if filename.lower().endswith(supported_extensions):
+            image_files.append(os.path.join(dir_path, filename))
+    
+    return image_files
 
 
 async def generate_google_tts(text: str, output_path: str, language_code: str = "fr-FR", voice_name: str = "fr-FR-Neural2-B"):
@@ -450,3 +505,135 @@ async def process_pdf_with_voice(pdf_path: str,
 
     return results, logs
 
+
+async def process_media_with_voice(media_path: str,
+                            voice_data: List[Dict],
+                            workdir: str,
+                            min_sections: int = 3,
+                            default_duration: float = 5.0,
+                            language_code: str = "fr-FR") -> tuple[List[Dict], List[str]]:
+    """
+    Unified pipeline that handles both PDF and image files (JPG, PNG, GIF).
+    Treats images the same way as PDF pages to generate videos.
+    
+    - PDF: Extracts all pages as images
+    - Single Image (JPG, PNG): Treats as single page
+    - Animated GIF: Extracts all frames as pages
+    
+    Returns (results, logs)
+    """
+    os.makedirs(workdir, exist_ok=True)
+    logs = []
+    
+    # Determine media type
+    media_ext = os.path.splitext(media_path)[1].lower()
+    is_pdf = media_ext == '.pdf'
+    
+    # A. Extract images based on file type
+    img_dir = os.path.join(workdir, "images_tmp")
+    
+    if is_pdf:
+        logger.info(f"📄 Processing PDF file...")
+        logs.append(f"Processing PDF file: {os.path.basename(media_path)}")
+        
+        # Extract text for page count (for PDF)
+        pages = extract_page_texts(media_path)
+        if not pages:
+            raise ValueError("The PDF contains no readable pages.")
+        num_pages = len(pages)
+        logger.info(f"📄 Number of pages : {num_pages}")
+        logs.append(f"PDF loaded with {num_pages} pages.")
+        
+        # Convert PDF to images
+        image_paths = pdf_to_images(media_path, img_dir)
+        logs.append(f"Converted PDF to {len(image_paths)} images.")
+        
+    else:
+        # Handle image files (JPG, PNG, GIF)
+        logger.info(f"🖼️  Processing image file...")
+        logs.append(f"Processing image file: {os.path.basename(media_path)}")
+        
+        # Normalize image(s) - handles single images and animated GIFs
+        image_paths = normalize_images(media_path, img_dir)
+        num_pages = len(image_paths)
+        logger.info(f"🖼️  Extracted {num_pages} image(s)")
+        logs.append(f"Extracted {num_pages} image(s) from {os.path.basename(media_path)}.")
+    
+    if not image_paths:
+        raise ValueError("No images could be extracted from the media file.")
+    
+    num_pages = len(image_paths)
+    segments = build_uniform_segments(num_pages, min_sections=min_sections)
+    logger.info(f"📦 Segments : {segments}")
+
+    # C. Generate TTS audios
+    audio_dir = os.path.join(workdir, "audio_tmp")
+    page_to_info, tts_logs = await generate_tts_audios(voice_data, audio_dir, language_code=language_code)
+    logs.extend(tts_logs)
+
+    # D. Build videos
+    slide_video_dir = os.path.join(workdir, "slides_tmp")
+    os.makedirs(slide_video_dir, exist_ok=True)
+
+    results = []
+
+    for seg in segments:
+        start, end = seg["start"], seg["end"]
+        pages_numbers = list(range(start + 1, end + 1))  # 1-based
+        logger.info(f"\n📚 Segment {seg['index']} -> pages {pages_numbers[0]} to {pages_numbers[-1]}")
+
+        segment_slide_videos = []
+
+        for p in pages_numbers:
+            # Ensure we don't go out of bounds
+            if p - 1 >= len(image_paths):
+                break
+                
+            img_path = image_paths[p - 1]
+            info = page_to_info.get(p)
+
+            if info is not None:
+                audio_path = info["audio_path"]
+                duration = info["duration"]
+            else:
+                audio_path = None
+                duration = default_duration
+                logs.append(f"⚠️ No audio info for page {p}, using silent default.")
+
+            slide_video_path = os.path.join(
+                slide_video_dir,
+                f"segment{seg['index']:02d}_page{p:03d}.mp4"
+            )
+
+            try:
+                create_single_slide_video(
+                    image_path=img_path,
+                    audio_path=audio_path,
+                    duration=duration,
+                    output_path=slide_video_path
+                )
+                segment_slide_videos.append(slide_video_path)
+            except Exception as e:
+                logs.append(f"❌ Failed to create video for page {p}: {e}")
+
+        # Concat segment
+        if segment_slide_videos:
+            final_segment_path = os.path.join(workdir, f"part_{seg['index']:02d}.mp4")
+            try:
+                concat_videos(segment_slide_videos, final_segment_path)
+
+                results.append({
+                    "index": seg["index"],
+                    "pages": pages_numbers,
+                    "video_path": final_segment_path
+                })
+            except Exception as e:
+                logs.append(f"❌ Failed to concat segment {seg['index']}: {e}")
+
+    # E. Cleanup
+    shutil.rmtree(img_dir, ignore_errors=True)
+    shutil.rmtree(audio_dir, ignore_errors=True)
+    shutil.rmtree(slide_video_dir, ignore_errors=True)
+    logger.info("\n🧹 Temporary files removed.")
+
+    return results, logs

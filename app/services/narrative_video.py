@@ -130,9 +130,9 @@ def pdf_to_images(pdf_path: str, out_dir: str, dpi: int = 150) -> List[str]:
 def normalize_images(image_path: str, out_dir: str) -> List[str]:
     """
     Handles single image files (JPG, PNG, GIF).
-    If it's an animated GIF, extracts all frames.
-    Otherwise, just copies/converts the image to PNG.
-    Returns a list of PNG file paths.
+    If it's an animated GIF, it is PRESERVED as a single file (not split).
+    Static images are converted to PNG.
+    Returns a list of file paths.
     """
     os.makedirs(out_dir, exist_ok=True)
     paths = []
@@ -141,14 +141,22 @@ def normalize_images(image_path: str, out_dir: str) -> List[str]:
         img = Image.open(image_path)
         
         # Check if it's an animated GIF
-        if hasattr(img, 'n_frames') and img.n_frames > 1:
-            # Extract all frames from animated GIF
-            logger.info(f"Extracting {img.n_frames} frames from animated GIF")
-            for i in range(img.n_frames):
-                img.seek(i)
-                out_path = os.path.join(out_dir, f"page_{i+1:03d}.png")
-                img.convert("RGB").save(out_path, "PNG")
-                paths.append(out_path)
+        is_animated = False
+        if getattr(img, "is_animated", False):
+            is_animated = True
+        elif hasattr(img, 'n_frames') and img.n_frames > 1:
+            is_animated = True
+
+        if is_animated:
+            # COPY the GIF as is, don't split it
+            logger.info(f"Animated GIF usage: preserving as looping video slide.")
+            out_path = os.path.join(out_dir, f"page_001.gif")
+            # We must save or copy the file
+            # Since PIL saving might not preserve all optimizations, simplest is to copy the original file
+            # but we assume the original 'image_path' is accessible.
+            import shutil
+            shutil.copy2(image_path, out_path)
+            paths.append(out_path)
         else:
             # Single image file - convert to PNG
             out_path = os.path.join(out_dir, f"page_001.png")
@@ -303,42 +311,49 @@ def create_single_slide_video(image_path: str,
                               output_path: str):
     """
     Creates a video for ONE slide.
+    Handles static images (PNG, JPG) and looping GIFs.
     """
     image_path = os.path.abspath(image_path)
     output_path = os.path.abspath(output_path)
+    
+    # Check if input is a GIF
+    is_gif = image_path.lower().endswith('.gif')
 
     # Ensure duration is at least something small to avoid ffmpeg errors
     if duration <= 0:
         duration = 5.0
 
+    # Build input arguments
+    input_args = []
+    if is_gif:
+        # Loop the GIF indefinitely
+        input_args = ["-stream_loop", "-1", "-i", image_path]
+    else:
+        # Loop static image
+        input_args = ["-loop", "1", "-i", image_path]
+
+    # Build audio arguments
     if audio_path is None:
         # Silent audio
-        cmd = [
-            "ffmpeg", "-y",
-            "-loop", "1", "-i", image_path,
-            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            "-t", str(duration),
-            "-pix_fmt", "yuv420p",
-            "-vf", "scale=1280:-2",
-            "-shortest",
-            output_path,
-        ]
+        audio_args = ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
     else:
         audio_path = os.path.abspath(audio_path)
-        cmd = [
-            "ffmpeg", "-y",
-            "-loop", "1", "-i", image_path,
-            "-i", audio_path,
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            "-t", str(duration),
-            "-pix_fmt", "yuv420p",
-            "-vf", "scale=1280:-2",
-            "-shortest",
-            output_path,
-        ]
+        audio_args = ["-i", audio_path]
+
+    # Assemble command
+    cmd = [
+        "ffmpeg", "-y",
+        *input_args,
+        *audio_args,
+        "-c:v", "libx264",
+        "-c:a", "aac",
+        "-t", str(duration),
+        "-pix_fmt", "yuv420p",
+        "-vf", "scale=1280:-2",
+        # For GIFs used as video streams + audio, -shortest might cut it if stream_loop isn't working right
+        # But we force duration with -t, so it should be fine.
+        output_path,
+    ]
 
     logger.info(f"🎞️  Slide -> video : {output_path} (target duration = {duration}s)")
     result = subprocess.run(
@@ -674,16 +689,23 @@ async def process_image_collection(image_paths: List[str],
             img = Image.open(image_path)
             
             # Check if it's an animated GIF
-            if hasattr(img, 'n_frames') and img.n_frames > 1:
-                logger.info(f"  → Animated GIF with {img.n_frames} frames")
-                logs.append(f"  → Animated GIF with {img.n_frames} frames")
+            is_animated = False
+            if getattr(img, "is_animated", False):
+                is_animated = True
+            elif hasattr(img, 'n_frames') and img.n_frames > 1:
+                is_animated = True
+
+            if is_animated:
+                logger.info(f"  → Animated GIF detected. Preserving as looping slide.")
+                logs.append(f"  → Animated GIF preserved.")
                 
-                for frame_idx in range(img.n_frames):
-                    img.seek(frame_idx)
-                    out_path = os.path.join(img_dir, f"page_{image_counter:03d}.png")
-                    img.convert("RGB").save(out_path, "PNG")
-                    all_image_paths.append(out_path)
-                    image_counter += 1
+                # Copy original GIF
+                out_path = os.path.join(img_dir, f"page_{image_counter:03d}.gif")
+                # Using shutil.copy2 to preserve metadata if possible
+                import shutil
+                shutil.copy2(image_path, out_path)
+                all_image_paths.append(out_path)
+                image_counter += 1
             else:
                 # Single image
                 out_path = os.path.join(img_dir, f"page_{image_counter:03d}.png")

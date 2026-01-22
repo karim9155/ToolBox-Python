@@ -154,7 +154,6 @@ def normalize_images(image_path: str, out_dir: str) -> List[str]:
             # We must save or copy the file
             # Since PIL saving might not preserve all optimizations, simplest is to copy the original file
             # but we assume the original 'image_path' is accessible.
-            import shutil
             shutil.copy2(image_path, out_path)
             paths.append(out_path)
         else:
@@ -702,7 +701,6 @@ async def process_image_collection(image_paths: List[str],
                 # Copy original GIF
                 out_path = os.path.join(img_dir, f"page_{image_counter:03d}.gif")
                 # Using shutil.copy2 to preserve metadata if possible
-                import shutil
                 shutil.copy2(image_path, out_path)
                 all_image_paths.append(out_path)
                 image_counter += 1

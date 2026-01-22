@@ -23,15 +23,15 @@ GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
 
 # Default voices for common languages
 DEFAULT_VOICES = {
-    "fr-FR": "fr-FR-Neural2-B",
-    "en-US": "en-US-Neural2-J",
-    "es-ES": "es-ES-Neural2-A",
-    "de-DE": "de-DE-Neural2-B",
+    "fr-FR": "fr-FR-Studio-D",
+    "en-US": "en-US-Studio-M",
+    "es-ES": "es-ES-Studio-C",
+    "de-DE": "de-DE-Studio-B",
     "it-IT": "it-IT-Neural2-A",
     "pt-BR": "pt-BR-Neural2-A",
     "ja-JP": "ja-JP-Neural2-B",
     "ko-KR": "ko-KR-Neural2-A",
-    "zh-CN": "cmn-CN-Wavenet-A", # Neural2 might not be available for all
+    "zh-CN": "cmn-CN-Wavenet-A", # Studio/Neural2 availability varies for CN
 }
 
 def get_audio_duration(audio_path: str) -> float:

@@ -100,7 +100,7 @@ async def generate_narrative_video(
                 shutil.copyfileobj(file.file, buffer)
                 
             # Process single media file
-            results, logs = await process_media_with_voice(
+            results, logs, tts_usage = await process_media_with_voice(
                 media_path=saved_file_path,
                 voice_data=voice_data,
                 workdir=temp_dir,
@@ -118,7 +118,7 @@ async def generate_narrative_video(
                 saved_files.append(saved_file_path)
             
             # Process multiple images as a collection
-            results, logs = await process_image_collection(
+            results, logs, tts_usage = await process_image_collection(
                 image_paths=saved_files,
                 voice_data=voice_data,
                 workdir=temp_dir,
@@ -143,14 +143,28 @@ async def generate_narrative_video(
             with open(report_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(logs))
             zipf.write(report_path, "generation_report.txt")
+            
+            # Add TTS usage/pricing report
+            pricing_path = os.path.join(temp_dir, "tts_pricing.json")
+            with open(pricing_path, "w", encoding="utf-8") as f:
+                json.dump(tts_usage, f, indent=2)
+            zipf.write(pricing_path, "tts_pricing.json")
         
         # Schedule cleanup after response
         background_tasks.add_task(cleanup_temp_dir, temp_dir)
         
+        # Add headers for immediate visibility
+        headers = {
+            "X-TTS-Cost-USD": str(tts_usage.get("total_cost_usd", 0)),
+            "X-TTS-Characters": str(tts_usage.get("total_chars", 0)),
+            "X-TTS-Voice": str(tts_usage.get("voice_name", "unknown"))
+        }
+        
         return FileResponse(
             zip_path, 
             media_type="application/zip", 
-            filename="narrative_videos.zip"
+            filename="narrative_videos.zip",
+            headers=headers
         )
             
     except Exception as e:

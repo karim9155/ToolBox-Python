@@ -34,6 +34,27 @@ DEFAULT_VOICES = {
     "zh-CN": "cmn-CN-Wavenet-A", # Studio/Neural2 availability varies for CN
 }
 
+def calculate_tts_cost(char_count: int, voice_name: str) -> float:
+    """
+    Estimates the cost of Google TTS usage based on character count and voice type.
+    Pricing (approximate USD per 1M chars):
+    - Studio: $160.00
+    - Neural2: $16.00
+    - WaveNet: $16.00
+    - Standard: $4.00
+    """
+    cost_per_million = 4.0 # Default/Standard
+    
+    if "Studio" in voice_name:
+        cost_per_million = 160.0
+    elif "Neural2" in voice_name:
+        cost_per_million = 16.0
+    elif "Wavenet" in voice_name:
+        cost_per_million = 16.0
+        
+    cost = (char_count / 1_000_000) * cost_per_million
+    return round(cost, 6)
+
 def get_audio_duration(audio_path: str) -> float:
     """
     Returns the duration of the audio file (in seconds) using ffprobe.
@@ -221,14 +242,15 @@ async def generate_google_tts(text: str, output_path: str, language_code: str = 
     else:
         raise RuntimeError(f"Google TTS API Error ({response.status_code}): {response.text}")
 
-async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_code: str = "fr-FR") -> tuple[Dict[int, Dict], List[str]]:
+async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_code: str = "fr-FR") -> tuple[Dict[int, Dict], List[str], Dict[str, float]]:
     """
     Generates MP3 for each slide using Google Cloud TTS.
-    Returns: (page_to_info_map, list_of_log_messages)
+    Returns: (page_to_info_map, list_of_log_messages, tts_usage_info)
     """
     os.makedirs(audio_dir, exist_ok=True)
     page_to_info = {}
     logs = []
+    total_chars = 0
     
     # Determine voice name from language code
     voice_name = DEFAULT_VOICES.get(language_code)
@@ -256,18 +278,25 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
         page_num = int(item["page_number"])
         text = item["voice_over"]
         title = item.get("slide_title", "")
+        
+        if not text or not text.strip():
+            msg = f"⚠️ Empty text for page {page_num}, skipping TTS."
+            logger.warning(msg)
+            logs.append(msg)
+            # Default silent entry
+            page_to_info[page_num] = {
+                "audio_path": None,
+                "duration": 5.0,
+                "title": title
+            }
+            continue
 
+        total_chars += len(text)
         audio_path = os.path.join(audio_dir, f"page_{page_num:03d}.mp3")
 
         logger.info(f"🔊 Google TTS page {page_num} ...")
         
         try:
-            if not text or not text.strip():
-                msg = f"⚠️ Empty text for page {page_num}, skipping TTS."
-                logger.warning(msg)
-                logs.append(msg)
-                raise ValueError("Empty text")
-            
             # Log truncated text for debugging
             logs.append(f"Page {page_num} text ({len(text)} chars): {text[:50]}...")
 
@@ -286,7 +315,7 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
             
             logs.append(f"✅ Generated audio for page {page_num} using {voice_name} ({duration}s)")
             
-            # Small delay to be nice to the API (though Google handles high throughput)
+            # Small delay to be nice to the API
             await asyncio.sleep(0.1)
 
         except Exception as e:
@@ -294,7 +323,7 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
             logger.error(msg)
             logs.append(msg)
             duration = 5.0 # Fallback
-            audio_path = None # Ensure we don't pass a bad path to ffmpeg
+            audio_path = None 
 
         page_to_info[page_num] = {
             "audio_path": audio_path,
@@ -302,7 +331,14 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
             "title": title,
         }
 
-    return page_to_info, logs
+    total_cost = calculate_tts_cost(total_chars, voice_name)
+    tts_usage = {
+        "total_chars": total_chars,
+        "total_cost_usd": total_cost,
+        "voice_name": voice_name
+    }
+    
+    return page_to_info, logs, tts_usage
 
 def create_single_slide_video(image_path: str,
                               audio_path: str,
@@ -422,10 +458,10 @@ async def process_pdf_with_voice(pdf_path: str,
                            workdir: str,
                            min_sections: int = 3,
                            default_duration: float = 5.0,
-                           language_code: str = "fr-FR") -> tuple[List[Dict], List[str]]:
+                           language_code: str = "fr-FR") -> tuple[List[Dict], List[str], Dict[str, float]]:
     """
     Main pipeline.
-    Returns (results, logs)
+    Returns (results, logs, tts_usage)
     """
     os.makedirs(workdir, exist_ok=True)
     logs = []
@@ -448,7 +484,7 @@ async def process_pdf_with_voice(pdf_path: str,
 
     # C. Generate TTS audios
     audio_dir = os.path.join(workdir, "audio_tmp")
-    page_to_info, tts_logs = await generate_tts_audios(voice_data, audio_dir, language_code=language_code)
+    page_to_info, tts_logs, tts_usage = await generate_tts_audios(voice_data, audio_dir, language_code=language_code)
     logs.extend(tts_logs)
 
     # D. Build videos
@@ -517,7 +553,7 @@ async def process_pdf_with_voice(pdf_path: str,
     shutil.rmtree(slide_video_dir, ignore_errors=True)
     logger.info("\n🧹 Temporary files removed.")
 
-    return results, logs
+    return results, logs, tts_usage
 
 
 async def process_media_with_voice(media_path: str,
@@ -525,7 +561,7 @@ async def process_media_with_voice(media_path: str,
                             workdir: str,
                             min_sections: int = 3,
                             default_duration: float = 5.0,
-                            language_code: str = "fr-FR") -> tuple[List[Dict], List[str]]:
+                            language_code: str = "fr-FR") -> tuple[List[Dict], List[str], Dict[str, float]]:
     """
     Unified pipeline that handles both PDF and image files (JPG, PNG, GIF).
     Treats images the same way as PDF pages to generate videos.
@@ -534,7 +570,7 @@ async def process_media_with_voice(media_path: str,
     - Single Image (JPG, PNG): Treats as single page
     - Animated GIF: Extracts all frames as pages
     
-    Returns (results, logs)
+    Returns (results, logs, tts_usage)
     """
     os.makedirs(workdir, exist_ok=True)
     logs = []
@@ -582,7 +618,7 @@ async def process_media_with_voice(media_path: str,
 
     # C. Generate TTS audios
     audio_dir = os.path.join(workdir, "audio_tmp")
-    page_to_info, tts_logs = await generate_tts_audios(voice_data, audio_dir, language_code=language_code)
+    page_to_info, tts_logs, tts_usage = await generate_tts_audios(voice_data, audio_dir, language_code=language_code)
     logs.extend(tts_logs)
 
     # D. Build videos
@@ -650,21 +686,21 @@ async def process_media_with_voice(media_path: str,
     shutil.rmtree(slide_video_dir, ignore_errors=True)
     logger.info("\n🧹 Temporary files removed.")
 
-    return results, logs
+    return results, logs, tts_usage
 
 async def process_image_collection(image_paths: List[str],
                             voice_data: List[Dict],
                             workdir: str,
                             min_sections: int = 3,
                             default_duration: float = 5.0,
-                            language_code: str = "fr-FR") -> tuple[List[Dict], List[str]]:
+                            language_code: str = "fr-FR") -> tuple[List[Dict], List[str], Dict[str, float]]:
     """
     Processes a collection of image files as individual slides.
     Each image is treated as a page/slide in order.
     
     Supports: JPG, PNG, GIF (animated GIFs are extracted frame-by-frame)
     
-    Returns (results, logs)
+    Returns (results, logs, tts_usage)
     """
     os.makedirs(workdir, exist_ok=True)
     logs = []
@@ -729,7 +765,7 @@ async def process_image_collection(image_paths: List[str],
 
     # C. Generate TTS audios
     audio_dir = os.path.join(workdir, "audio_tmp")
-    page_to_info, tts_logs = await generate_tts_audios(voice_data, audio_dir, language_code=language_code)
+    page_to_info, tts_logs, tts_usage = await generate_tts_audios(voice_data, audio_dir, language_code=language_code)
     logs.extend(tts_logs)
 
     # D. Build videos
@@ -797,4 +833,4 @@ async def process_image_collection(image_paths: List[str],
     shutil.rmtree(slide_video_dir, ignore_errors=True)
     logger.info("\n🧹 Temporary files removed.")
 
-    return results, logs
+    return results, logs, tts_usage

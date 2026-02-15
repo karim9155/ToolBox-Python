@@ -1,5 +1,10 @@
 from fastapi import FastAPI
 from app.routers import video, audio, audit, fssc, pdf, narrative
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = FastAPI(title="Toolbox API", version="1.0")
 

@@ -331,9 +331,9 @@ def _run_narrative_job_async(
         if not results:
             raise Exception("No videos were generated")
         
-        logger.info(f"\n📦 Encoding and sending {len(results)} videos one by one...")
+        logger.info(f"\n📦 Uploading {len(results)} videos to Supabase...")
         
-        # Calculate total duration and processing time
+        # Calculate total duration
         total_duration = 0.0
         for res in results:
             if "duration" in res:
@@ -347,68 +347,75 @@ def _run_narrative_job_async(
         logger.info(f"   TTS cost: ${tts_usage.get('total_cost_usd', 0):.4f}")
         logger.info(f"   TTS characters: {tts_usage.get('total_chars', 0)}")
         
-        # Update job status
-        update_job_status(job_id, "completed", videoCount=len(results))
+        # Determine environment from callback URL
+        environment = "prod" if "myqateam.ai" in callback_url and "preprod" not in callback_url else "preprod"
+        logger.info(f"   Target environment: {environment.upper()}")
         
-        # Send each video in a separate callback to avoid payload size limits
+        # Update job status
+        update_job_status(job_id, "uploading", videoCount=len(results))
+        
+        # Import Supabase upload function
+        from app.utils.supabase_storage import upload_video_to_supabase
+        
+        # Upload each video to Supabase and send lightweight callback
         successful_callbacks = 0
         failed_callbacks = 0
         
         for idx, res in enumerate(results):
             video_path = res["video_path"]
+            filename = f"narrative_video_{idx}.mp4"
             
-            # Check file size before encoding
             file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
-            logger.info(f"\n📹 Video {idx+1}/{len(results)}: {os.path.basename(video_path)} ({file_size_mb:.2f} MB)")
+            logger.info(f"\n📹 Video {idx+1}/{len(results)}: {filename} ({file_size_mb:.2f} MB)")
             
-            with open(video_path, "rb") as f:
-                video_data = base64.b64encode(f.read()).decode("utf-8")
-            
-            logger.info(f"   Encoded to base64: {len(video_data)} chars")
-            
-            # Prepare individual video callback payload
-            callback_payload = {
-                "jobId": job_id,
-                "status": "video_ready",
-                "video": {
-                    "filename": os.path.basename(video_path),
-                    "data": video_data,
-                    "index": idx,
-                    "totalVideos": len(results)
-                },
-                "metadata": {
+            try:
+                # Upload to Supabase
+                upload_result = upload_video_to_supabase(
+                    video_path=video_path,
+                    document_id=document_id,
+                    project_id=project_id,
+                    filename=filename,
+                    video_index=idx,
+                    environment=environment
+                )
+                
+                logger.info(f"   ✅ Uploaded to Supabase: {upload_result['storage_path']}")
+                
+                # Send lightweight callback (no video data!)
+                callback_payload = {
+                    "jobId": job_id,
+                    "status": "video_ready",
                     "currentVideo": idx + 1,
                     "totalVideos": len(results),
-                    "totalDuration": total_duration,
-                    "processingTime": round(processing_time, 2),
-                    "ttsCost": tts_usage.get("total_cost_usd", 0),
-                    "ttsCharacters": tts_usage.get("total_chars", 0),
-                    "voiceName": tts_usage.get("voice_name", "unknown")
+                    "documentId": document_id,
+                    "videoStoragePath": upload_result["storage_path"],
+                    "videoRecordId": upload_result["record_id"]
                 }
-            }
-            
-            if document_id:
-                callback_payload["documentId"] = document_id
-            if project_id:
-                callback_payload["projectId"] = project_id
-            
-            logger.info(f"   Payload size: {len(str(callback_payload))} bytes")
-            logger.info(f"   📞 Sending callback {idx+1}/{len(results)} to {callback_url[:50]}...")
-            
-            success = send_callback(callback_url, callback_secret, callback_payload)
-            
-            if success:
-                successful_callbacks += 1
-                logger.info(f"   ✅ Video {idx+1} callback sent successfully")
-            else:
+                
+                if project_id:
+                    callback_payload["projectId"] = project_id
+                
+                logger.info(f"   📞 Sending lightweight callback {idx+1}/{len(results)}...")
+                
+                success = send_callback(callback_url, callback_secret, callback_payload)
+                
+                if success:
+                    successful_callbacks += 1
+                    logger.info(f"   ✅ Callback sent successfully")
+                else:
+                    failed_callbacks += 1
+                    logger.error(f"   ❌ Callback failed")
+                    
+            except Exception as e:
                 failed_callbacks += 1
-                logger.error(f"   ❌ Video {idx+1} callback failed")
+                logger.error(f"   ❌ Upload/callback failed: {e}")
         
         # Send final completion callback
         logger.info(f"\n📤 Sending final completion callback...")
         completion_payload = {
             "jobId": job_id,
             "status": "completed",
+            "documentId": document_id,
             "metadata": {
                 "totalVideos": len(results),
                 "totalDuration": total_duration,
@@ -416,13 +423,11 @@ def _run_narrative_job_async(
                 "ttsCost": tts_usage.get("total_cost_usd", 0),
                 "ttsCharacters": tts_usage.get("total_chars", 0),
                 "voiceName": tts_usage.get("voice_name", "unknown"),
-                "successfulCallbacks": successful_callbacks,
-                "failedCallbacks": failed_callbacks
+                "successfulUploads": successful_callbacks,
+                "failedUploads": failed_callbacks
             }
         }
         
-        if document_id:
-            completion_payload["documentId"] = document_id
         if project_id:
             completion_payload["projectId"] = project_id
         
@@ -431,14 +436,15 @@ def _run_narrative_job_async(
         if success and failed_callbacks == 0:
             logger.info(f"\n{'='*80}")
             logger.info(f"🎉 Job {job_id} completed successfully!")
-            logger.info(f"   All {successful_callbacks} video callbacks sent successfully")
+            logger.info(f"   All {successful_callbacks} videos uploaded to Supabase")
             logger.info(f"{'='*80}\n")
+            update_job_status(job_id, "completed")
         else:
             if failed_callbacks > 0:
-                logger.warning(f"\n⚠️ Job {job_id} completed with {failed_callbacks} failed callbacks")
+                logger.warning(f"\n⚠️ Job {job_id} completed with {failed_callbacks} failed uploads")
                 update_job_status(job_id, "completed_with_errors")
             else:
-                logger.error(f"\n❌ Failed to send final completion callback for job {job_id}")
+                logger.error(f"\n❌ Failed to send final completion callback")
                 update_job_status(job_id, "callback_failed")
             logger.info(f"{'='*80}\n")
         

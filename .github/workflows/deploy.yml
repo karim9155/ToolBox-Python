@@ -48,4 +48,8 @@ jobs:
             --restart unless-stopped \
             -e ASSEMBLYAI_API_KEY=${{ secrets.ASSEMBLYAI_API_KEY }} \
             -e GOOGLE_TTS_API_KEY=${{ secrets.GOOGLE_TTS_API_KEY }} \
+            -e TOOLBOX_CALLBACK_SECRET=${{ secrets.TOOLBOX_CALLBACK_SECRET }} \
+            -e ALLOWED_CALLBACK_DOMAINS=${{ secrets.ALLOWED_CALLBACK_DOMAINS }} \
+            -e CALLBACK_TIMEOUT=30 \
+            -e MAX_CALLBACK_RETRIES=3 \
             karimkli/toolbox-api:latest

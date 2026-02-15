@@ -52,4 +52,10 @@ jobs:
             -e ALLOWED_CALLBACK_DOMAINS=${{ secrets.ALLOWED_CALLBACK_DOMAINS }} \
             -e CALLBACK_TIMEOUT=30 \
             -e MAX_CALLBACK_RETRIES=3 \
+            -e DEPLOYMENT_ENV=prod \
+            -e SUPABASE_PREPROD_URL=${{ secrets.SUPABASE_PREPROD_URL }} \
+            -e SUPABASE_PREPROD_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_PREPROD_SERVICE_ROLE_KEY }} \
+            -e SUPABASE_PROD_URL=${{ secrets.SUPABASE_PROD_URL }} \
+            -e SUPABASE_PROD_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_PROD_SERVICE_ROLE_KEY }} \
+            -e SUPABASE_STORAGE_BUCKET=videos \
             karimkli/toolbox-api:latest

@@ -331,34 +331,11 @@ def _run_narrative_job_async(
         if not results:
             raise Exception("No videos were generated")
         
-        logger.info(f"\n📦 Encoding {len(results)} videos to base64...")
+        logger.info(f"\n📦 Encoding and sending {len(results)} videos one by one...")
         
-        # Base64 encode all video files
-        videos_payload = []
+        # Calculate total duration and processing time
         total_duration = 0.0
-        
-        for idx, res in enumerate(results):
-            video_path = res["video_path"]
-            
-            # Check file size before encoding (warn if > 100MB)
-            file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
-            logger.info(f"   Video {idx+1}: {os.path.basename(video_path)} ({file_size_mb:.2f} MB)")
-            
-            if file_size_mb > 100:
-                logger.warning(f"⚠️ Warning: Video {idx} is {file_size_mb:.1f}MB (large payload)")
-            
-            with open(video_path, "rb") as f:
-                video_data = base64.b64encode(f.read()).decode("utf-8")
-            
-            logger.info(f"      Encoded to base64: {len(video_data)} chars")
-            
-            videos_payload.append({
-                "filename": os.path.basename(video_path),
-                "data": video_data,
-                "index": idx
-            })
-            
-            # Sum up durations if available
+        for res in results:
             if "duration" in res:
                 total_duration += res["duration"]
         
@@ -371,41 +348,98 @@ def _run_narrative_job_async(
         logger.info(f"   TTS characters: {tts_usage.get('total_chars', 0)}")
         
         # Update job status
-        update_job_status(job_id, "completed", videoCount=len(videos_payload))
+        update_job_status(job_id, "completed", videoCount=len(results))
         
-        # Send success callback
-        logger.info(f"\n📤 Preparing callback payload...")
-        callback_payload = {
+        # Send each video in a separate callback to avoid payload size limits
+        successful_callbacks = 0
+        failed_callbacks = 0
+        
+        for idx, res in enumerate(results):
+            video_path = res["video_path"]
+            
+            # Check file size before encoding
+            file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+            logger.info(f"\n📹 Video {idx+1}/{len(results)}: {os.path.basename(video_path)} ({file_size_mb:.2f} MB)")
+            
+            with open(video_path, "rb") as f:
+                video_data = base64.b64encode(f.read()).decode("utf-8")
+            
+            logger.info(f"   Encoded to base64: {len(video_data)} chars")
+            
+            # Prepare individual video callback payload
+            callback_payload = {
+                "jobId": job_id,
+                "status": "video_ready",
+                "video": {
+                    "filename": os.path.basename(video_path),
+                    "data": video_data,
+                    "index": idx,
+                    "totalVideos": len(results)
+                },
+                "metadata": {
+                    "currentVideo": idx + 1,
+                    "totalVideos": len(results),
+                    "totalDuration": total_duration,
+                    "processingTime": round(processing_time, 2),
+                    "ttsCost": tts_usage.get("total_cost_usd", 0),
+                    "ttsCharacters": tts_usage.get("total_chars", 0),
+                    "voiceName": tts_usage.get("voice_name", "unknown")
+                }
+            }
+            
+            if document_id:
+                callback_payload["documentId"] = document_id
+            if project_id:
+                callback_payload["projectId"] = project_id
+            
+            logger.info(f"   Payload size: {len(str(callback_payload))} bytes")
+            logger.info(f"   📞 Sending callback {idx+1}/{len(results)} to {callback_url[:50]}...")
+            
+            success = send_callback(callback_url, callback_secret, callback_payload)
+            
+            if success:
+                successful_callbacks += 1
+                logger.info(f"   ✅ Video {idx+1} callback sent successfully")
+            else:
+                failed_callbacks += 1
+                logger.error(f"   ❌ Video {idx+1} callback failed")
+        
+        # Send final completion callback
+        logger.info(f"\n📤 Sending final completion callback...")
+        completion_payload = {
             "jobId": job_id,
             "status": "completed",
-            "videos": videos_payload,
             "metadata": {
+                "totalVideos": len(results),
                 "totalDuration": total_duration,
-                "videoCount": len(videos_payload),
                 "processingTime": round(processing_time, 2),
                 "ttsCost": tts_usage.get("total_cost_usd", 0),
                 "ttsCharacters": tts_usage.get("total_chars", 0),
-                "voiceName": tts_usage.get("voice_name", "unknown")
+                "voiceName": tts_usage.get("voice_name", "unknown"),
+                "successfulCallbacks": successful_callbacks,
+                "failedCallbacks": failed_callbacks
             }
         }
         
         if document_id:
-            callback_payload["documentId"] = document_id
+            completion_payload["documentId"] = document_id
         if project_id:
-            callback_payload["projectId"] = project_id
+            completion_payload["projectId"] = project_id
         
-        logger.info(f"   Payload size: {len(str(callback_payload))} bytes")
-        logger.info(f"\n📞 Sending callback to {callback_url[:50]}...")
+        success = send_callback(callback_url, callback_secret, completion_payload)
         
-        success = send_callback(callback_url, callback_secret, callback_payload)
-        
-        if success:
+        if success and failed_callbacks == 0:
             logger.info(f"\n{'='*80}")
             logger.info(f"🎉 Job {job_id} completed successfully!")
+            logger.info(f"   All {successful_callbacks} video callbacks sent successfully")
             logger.info(f"{'='*80}\n")
         else:
-            logger.error(f"\n❌ Failed to send callback for job {job_id}")
-            update_job_status(job_id, "callback_failed")
+            if failed_callbacks > 0:
+                logger.warning(f"\n⚠️ Job {job_id} completed with {failed_callbacks} failed callbacks")
+                update_job_status(job_id, "completed_with_errors")
+            else:
+                logger.error(f"\n❌ Failed to send final completion callback for job {job_id}")
+                update_job_status(job_id, "callback_failed")
             logger.info(f"{'='*80}\n")
         
     except Exception as e:

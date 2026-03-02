@@ -14,7 +14,106 @@ import pdfplumber
 import fitz  # PyMuPDF
 # import edge_tts # Removed in favor of Google TTS
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("narrative.service")
+
+# ---------------------------------------------------------------------------
+# Resolve ffmpeg / ffprobe paths once at import time.
+# On some Windows setups the server process may not have the updated PATH,
+# so we fall back to the known winget install location.
+# ---------------------------------------------------------------------------
+_FFMPEG_PATH = shutil.which("ffmpeg") or os.path.expandvars(
+    r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin\ffmpeg.EXE"
+)
+_FFPROBE_PATH = shutil.which("ffprobe") or os.path.expandvars(
+    r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin\ffprobe.EXE"
+)
+logger.info(f"ffmpeg  resolved to: {_FFMPEG_PATH}")
+logger.info(f"ffprobe resolved to: {_FFPROBE_PATH}")
+
+# ---------------------------------------------------------------------------
+# Watermark configuration – load pre-rendered PNG logo once at import time
+# ---------------------------------------------------------------------------
+_WATERMARK_PNG_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "watermark.png")
+_WATERMARK_IMG: Image.Image | None = None
+
+try:
+    _WATERMARK_IMG = Image.open(_WATERMARK_PNG_PATH).convert("RGBA")
+    logger.info(f"Watermark PNG loaded: {_WATERMARK_IMG.size}")
+except Exception as _e:
+    logger.warning(f"⚠️ Could not load watermark PNG ({_WATERMARK_PNG_PATH}): {_e}")
+
+
+def _paste_watermark(img: Image.Image) -> Image.Image:
+    """
+    Pastes the pre-rendered SVG watermark in the **bottom-right** corner.
+    The watermark is scaled to ~20 % of the slide width so it stays
+    proportional on any resolution.  Modifies *img* in-place.
+    """
+    if _WATERMARK_IMG is None:
+        return img
+
+    # Scale watermark to ~20 % of slide width (min 120 px)
+    target_w = max(120, int(img.width * 0.20))
+    ratio = target_w / _WATERMARK_IMG.width
+    target_h = int(_WATERMARK_IMG.height * ratio)
+    wm = _WATERMARK_IMG.resize((target_w, target_h), Image.LANCZOS)
+
+    margin = 20
+    x = img.width - target_w - margin
+    y = img.height - target_h - margin
+
+    # Composite: handle RGBA properly
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+        img.paste(wm, (x, y), wm)
+        img = img.convert("RGB")
+    else:
+        img.paste(wm, (x, y), wm)
+    return img
+
+
+def add_watermark_to_images(image_paths: List[str]) -> None:
+    """
+    Stamps the SVG watermark on every image file in *image_paths* (in-place).
+    Handles static images (PNG/JPG) and animated GIFs.
+    """
+    logger.info(f"\n🏷️  Adding watermark to {len(image_paths)} image(s)...")
+    for img_path in image_paths:
+        try:
+            img = Image.open(img_path)
+            is_animated = getattr(img, "is_animated", False) or (
+                hasattr(img, "n_frames") and img.n_frames > 1
+            )
+
+            if is_animated:
+                # Watermark every frame of the animated GIF
+                frames = []
+                durations = []
+                for frame_idx in range(img.n_frames):
+                    img.seek(frame_idx)
+                    frame = img.convert("RGBA")
+                    frame = _paste_watermark(frame)
+                    frames.append(frame)
+                    durations.append(img.info.get("duration", 100))
+                frames[0].save(
+                    img_path,
+                    save_all=True,
+                    append_images=frames[1:],
+                    loop=img.info.get("loop", 0),
+                    duration=durations,
+                )
+                logger.info(f"   ✅ Watermarked animated GIF ({img.n_frames} frames): {img_path}")
+            else:
+                img = img.convert("RGB")
+                img = _paste_watermark(img)
+                if img_path.lower().endswith(".png"):
+                    img.save(img_path, "PNG")
+                else:
+                    img.save(img_path, "JPEG")
+                logger.info(f"   ✅ Watermarked: {img_path}")
+        except Exception as e:
+            logger.warning(f"   ⚠️ Could not watermark {img_path}: {e}")
+
 
 # Google Cloud TTS Configuration
 # Key is now loaded from environment variable for security
@@ -60,16 +159,16 @@ def get_audio_duration(audio_path: str) -> float:
     Returns the duration of the audio file (in seconds) using ffprobe.
     """
     audio_path = os.path.abspath(audio_path)
+    logger.info(f"\n🔍 Getting audio duration for: {audio_path}")
     cmd = [
-        "ffprobe",
+        _FFPROBE_PATH,
         "-v", "error",
         "-show_entries", "format=duration",
         "-of", "default=noprint_wrappers=1:nokey=1",
         audio_path,
     ]
+    logger.info(f"   Command: {' '.join(cmd)}")
     try:
-        # On Windows, we might need shell=True or full path if not in PATH, 
-        # but usually subprocess.run works if ffmpeg/ffprobe are in PATH.
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
@@ -77,15 +176,19 @@ def get_audio_duration(audio_path: str) -> float:
             text=True,
             check=False
         )
+        logger.info(f"   ffprobe return code: {result.returncode}")
+        logger.info(f"   ffprobe stdout: '{result.stdout.strip()}'")
 
         if result.returncode != 0 or not result.stdout.strip():
-            logger.warning(f"⚠️ Impossible to retrieve duration for {audio_path}, defaulting to None.")
-            logger.warning(f"ffprobe stderr: {result.stderr}")
+            logger.warning(f"   ⚠️ Impossible to retrieve duration for {audio_path}, defaulting to None.")
+            logger.warning(f"   ffprobe stderr: {result.stderr}")
             return None
 
-        return float(result.stdout.strip())
+        duration = float(result.stdout.strip())
+        logger.info(f"   ✅ Duration: {duration:.2f}s")
+        return duration
     except Exception as e:
-        logger.error(f"⚠️ Error getting duration for {audio_path}: {e}")
+        logger.error(f"   ⚠️ Error getting duration for {audio_path}: {e}")
         return None
 
 def extract_page_texts(pdf_path: str) -> List[Dict]:
@@ -125,11 +228,16 @@ def pdf_to_images(pdf_path: str, out_dir: str, dpi: int = 150) -> List[str]:
     """
     Converts each page of the PDF to PNG using PyMuPDF (fitz).
     """
+    logger.info(f"\n🖼️  pdf_to_images called")
+    logger.info(f"   PDF path: {pdf_path}")
+    logger.info(f"   Output dir: {out_dir}")
+    logger.info(f"   DPI: {dpi}")
     os.makedirs(out_dir, exist_ok=True)
     paths = []
     
     try:
         doc = fitz.open(pdf_path)
+        logger.info(f"   PDF opened: {len(doc)} pages")
         for i in range(len(doc)):
             page = doc.load_page(i)
             # Set zoom factor based on DPI (72 is default PDF DPI)
@@ -139,10 +247,13 @@ def pdf_to_images(pdf_path: str, out_dir: str, dpi: int = 150) -> List[str]:
             
             out_path = os.path.join(out_dir, f"page_{i+1:03d}.png")
             pix.save(out_path)
+            file_size = os.path.getsize(out_path) / 1024
+            logger.info(f"   Page {i+1}/{len(doc)} -> {out_path} ({pix.width}x{pix.height}, {file_size:.1f} KB)")
             paths.append(out_path)
         doc.close()
+        logger.info(f"   ✅ All {len(paths)} pages converted to images")
     except Exception as e:
-        logger.error(f"Error converting PDF to images: {e}")
+        logger.error(f"   ❌ Error converting PDF to images: {e}")
         raise RuntimeError(f"Failed to convert PDF to images: {e}")
 
     return paths
@@ -155,11 +266,15 @@ def normalize_images(image_path: str, out_dir: str) -> List[str]:
     Static images are converted to PNG.
     Returns a list of file paths.
     """
+    logger.info(f"\n🖼️  normalize_images called")
+    logger.info(f"   Image path: {image_path}")
+    logger.info(f"   Output dir: {out_dir}")
     os.makedirs(out_dir, exist_ok=True)
     paths = []
     
     try:
         img = Image.open(image_path)
+        logger.info(f"   Image opened: {img.format}, size={img.size}, mode={img.mode}")
         
         # Check if it's an animated GIF
         is_animated = False
@@ -169,22 +284,21 @@ def normalize_images(image_path: str, out_dir: str) -> List[str]:
             is_animated = True
 
         if is_animated:
-            # COPY the GIF as is, don't split it
-            logger.info(f"Animated GIF usage: preserving as looping video slide.")
+            logger.info(f"   Animated GIF detected ({img.n_frames} frames). Preserving as looping video slide.")
             out_path = os.path.join(out_dir, f"page_001.gif")
-            # We must save or copy the file
-            # Since PIL saving might not preserve all optimizations, simplest is to copy the original file
-            # but we assume the original 'image_path' is accessible.
             shutil.copy2(image_path, out_path)
+            logger.info(f"   Copied to: {out_path}")
             paths.append(out_path)
         else:
-            # Single image file - convert to PNG
+            logger.info(f"   Static image. Converting to PNG.")
             out_path = os.path.join(out_dir, f"page_001.png")
             img.convert("RGB").save(out_path, "PNG")
+            file_size = os.path.getsize(out_path) / 1024
+            logger.info(f"   Saved to: {out_path} ({file_size:.1f} KB)")
             paths.append(out_path)
             
     except Exception as e:
-        logger.error(f"Error processing image: {e}")
+        logger.error(f"   ❌ Error processing image: {e}")
         raise RuntimeError(f"Failed to process image: {e}")
     
     return paths
@@ -213,6 +327,11 @@ async def generate_google_tts(text: str, output_path: str, language_code: str = 
     """
     Generates audio using Google Cloud Text-to-Speech API.
     """
+    logger.info(f"\n🎵 generate_google_tts called")
+    logger.info(f"   Text ({len(text)} chars): '{text[:100]}...'")
+    logger.info(f"   Output path: {output_path}")
+    logger.info(f"   Language: {language_code}, Voice: {voice_name}")
+    
     headers = {"Content-Type": "application/json; charset=utf-8"}
     data = {
         "input": {"text": text},
@@ -222,13 +341,17 @@ async def generate_google_tts(text: str, output_path: str, language_code: str = 
     params = {"key": GOOGLE_TTS_API_KEY}
 
     if not GOOGLE_TTS_API_KEY:
+        logger.error("   ❌ GOOGLE_TTS_API_KEY not set!")
         raise RuntimeError("GOOGLE_TTS_API_KEY environment variable is not set.")
+
+    logger.info(f"   Sending request to Google TTS API...")
 
     def _request():
         return requests.post(GOOGLE_TTS_URL, headers=headers, json=data, params=params)
 
     # Run blocking request in a separate thread
     response = await asyncio.to_thread(_request)
+    logger.info(f"   Response status: {response.status_code}")
 
     if response.status_code == 200:
         response_json = response.json()
@@ -240,11 +363,14 @@ async def generate_google_tts(text: str, output_path: str, language_code: str = 
                 os.makedirs(output_dir, exist_ok=True)
             with open(output_path, "wb") as f:
                 f.write(base64.b64decode(audio_content))
-            logger.info(f"✅ Saved audio to {output_path} ({os.path.getsize(output_path)} bytes)")
+            file_size = os.path.getsize(output_path)
+            logger.info(f"   ✅ Audio saved: {output_path} ({file_size} bytes, {file_size/1024:.1f} KB)")
             return True
         else:
+            logger.error(f"   ❌ No audio content in response: {response_json}")
             raise RuntimeError(f"No audio content in Google TTS response. Response: {response_json}")
     else:
+        logger.error(f"   ❌ Google TTS API Error ({response.status_code}): {response.text}")
         raise RuntimeError(f"Google TTS API Error ({response.status_code}): {response.text}")
 
 async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_code: str = "fr-FR", voice_name: str = None) -> tuple[Dict[int, Dict], List[str], Dict[str, float]]:
@@ -252,6 +378,11 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
     Generates MP3 for each slide using Google Cloud TTS.
     Returns: (page_to_info_map, list_of_log_messages, tts_usage_info)
     """
+    logger.info(f"\n{'='*60}")
+    logger.info(f"🎙️  generate_tts_audios called")
+    logger.info(f"   Audio dir: {audio_dir}")
+    logger.info(f"   Language: {language_code}")
+    logger.info(f"   Voice name (param): {voice_name}")
     os.makedirs(audio_dir, exist_ok=True)
     page_to_info = {}
     logs = []
@@ -261,23 +392,30 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
     if not voice_name:
         voice_name = DEFAULT_VOICES.get(language_code)
         if not voice_name:
-            # Fallback heuristic or default to English if unknown
             voice_name = f"{language_code}-Neural2-A"
+            logger.warning(f"   ⚠️ Unknown language {language_code}, using fallback voice {voice_name}")
             logs.append(f"⚠️ Unknown language {language_code}, trying fallback voice {voice_name}")
+        else:
+            logger.info(f"   Selected default voice: {voice_name}")
 
-    # Handle nested structure if present (e.g. [{"data": [...]}] or just [...])
+    # Handle nested structure if present
     data_list = voice_data
     if isinstance(voice_data, list) and len(voice_data) > 0 and "data" in voice_data[0]:
         data_list = voice_data[0]["data"]
+        logger.info(f"   Unwrapped nested 'data' key from voice_data")
     elif isinstance(voice_data, dict) and "data" in voice_data:
         data_list = voice_data["data"]
+        logger.info(f"   Unwrapped 'data' key from voice_data dict")
     
+    logger.info(f"   Processing {len(data_list)} items from voice_data using Google TTS ({language_code} / {voice_name}).")
     logs.append(f"Processing {len(data_list)} items from voice_data using Google TTS ({language_code} / {voice_name}).")
 
-    for item in data_list:
+    for item_idx, item in enumerate(data_list):
         if not isinstance(item, dict):
+            logger.warning(f"   [{item_idx}] Skipping non-dict item: {item}")
             continue
         if "page_number" not in item or "voice_over" not in item:
+            logger.warning(f"   [{item_idx}] Skipping item without page_number or voice_over: {item}")
             logs.append(f"Skipping item without page_number or voice_over: {item}")
             continue
 
@@ -285,11 +423,13 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
         text = item["voice_over"]
         title = item.get("slide_title", "")
         
+        logger.info(f"\n   📄 [{item_idx+1}/{len(data_list)}] Page {page_num}: title='{title}'")
+        logger.info(f"      Text ({len(text)} chars): '{text[:80]}...'")
+        
         if not text or not text.strip():
             msg = f"⚠️ Empty text for page {page_num}, skipping TTS."
-            logger.warning(msg)
+            logger.warning(f"      {msg}")
             logs.append(msg)
-            # Default silent entry
             page_to_info[page_num] = {
                 "audio_path": None,
                 "duration": 5.0,
@@ -298,12 +438,12 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
             continue
 
         total_chars += len(text)
+        logger.info(f"      Total chars so far: {total_chars}")
         audio_path = os.path.join(audio_dir, f"page_{page_num:03d}.mp3")
 
-        logger.info(f"🔊 Google TTS page {page_num} ...")
+        logger.info(f"      🔊 Generating TTS -> {audio_path}")
         
         try:
-            # Log truncated text for debugging
             logs.append(f"Page {page_num} text ({len(text)} chars): {text[:50]}...")
 
             await generate_google_tts(text, audio_path, language_code=language_code, voice_name=voice_name)
@@ -311,14 +451,19 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
             # Verify file size
             if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
                 msg = f"❌ Generated audio file for page {page_num} is empty or missing."
-                logger.error(msg)
+                logger.error(f"      {msg}")
                 raise RuntimeError("Empty audio file generated")
+
+            audio_file_size = os.path.getsize(audio_path)
+            logger.info(f"      Audio file size: {audio_file_size} bytes ({audio_file_size/1024:.1f} KB)")
 
             duration = get_audio_duration(audio_path)
             if duration is None:
                 msg = f"❌ Invalid audio file (ffprobe failed) for page {page_num}"
+                logger.error(f"      {msg}")
                 raise RuntimeError("Invalid audio file (ffprobe failed)")
             
+            logger.info(f"      ✅ TTS done: page {page_num}, duration={duration:.2f}s, voice={voice_name}")
             logs.append(f"✅ Generated audio for page {page_num} using {voice_name} ({duration}s)")
             
             # Small delay to be nice to the API
@@ -326,7 +471,7 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
 
         except Exception as e:
             msg = f"❌ Failed to generate TTS for page {page_num}: {e}"
-            logger.error(msg)
+            logger.error(f"      {msg}")
             logs.append(msg)
             duration = 5.0 # Fallback
             audio_path = None 
@@ -336,6 +481,7 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
             "duration": duration,
             "title": title,
         }
+        logger.info(f"      page_to_info[{page_num}] = audio={audio_path is not None}, duration={duration}, title='{title}'")
 
     total_cost = calculate_tts_cost(total_chars, voice_name)
     tts_usage = {
@@ -343,6 +489,13 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
         "total_cost_usd": total_cost,
         "voice_name": voice_name
     }
+    
+    logger.info(f"\n   💰 TTS Usage Summary:")
+    logger.info(f"      Total characters: {total_chars}")
+    logger.info(f"      Estimated cost: ${total_cost:.6f}")
+    logger.info(f"      Voice: {voice_name}")
+    logger.info(f"      Pages processed: {len(page_to_info)}")
+    logger.info(f"{'='*60}\n")
     
     return page_to_info, logs, tts_usage
 
@@ -357,8 +510,15 @@ def create_single_slide_video(image_path: str,
     image_path = os.path.abspath(image_path)
     output_path = os.path.abspath(output_path)
     
+    logger.info(f"\n🎬 create_single_slide_video")
+    logger.info(f"   Image: {image_path}")
+    logger.info(f"   Audio: {audio_path}")
+    logger.info(f"   Duration: {duration}s")
+    logger.info(f"   Output: {output_path}")
+    
     # Check if input is a GIF
     is_gif = image_path.lower().endswith('.gif')
+    logger.info(f"   Is GIF: {is_gif}")
 
     # Ensure duration is at least something small to avoid ffmpeg errors
     if duration <= 0:
@@ -383,7 +543,7 @@ def create_single_slide_video(image_path: str,
 
     # Assemble command
     cmd = [
-        "ffmpeg", "-y",
+        _FFMPEG_PATH, "-y",
         *input_args,
         *audio_args,
         "-c:v", "libx264",
@@ -414,6 +574,13 @@ def concat_videos(video_paths: List[str], output_path: str):
     """
     Concatenates multiple mp4 files into one.
     """
+    logger.info(f"\n🔗 concat_videos called")
+    logger.info(f"   Input videos: {len(video_paths)}")
+    for i, vp in enumerate(video_paths):
+        vsize = os.path.getsize(vp) / (1024*1024) if os.path.exists(vp) else 0
+        logger.info(f"     [{i+1}] {vp} ({vsize:.2f} MB)")
+    logger.info(f"   Output: {output_path}")
+    
     if not video_paths:
         raise ValueError("No videos to concatenate")
 
@@ -428,7 +595,7 @@ def concat_videos(video_paths: List[str], output_path: str):
     output_path = os.path.abspath(output_path)
 
     cmd = [
-        "ffmpeg",
+        _FFMPEG_PATH,
         "-y",
         "-f", "concat",
         "-safe", "0",
@@ -440,7 +607,7 @@ def concat_videos(video_paths: List[str], output_path: str):
         output_path,
     ]
 
-    logger.info(f"🔗 Concatenation to : {output_path}")
+    logger.info(f"   ffmpeg concat command: {' '.join(cmd)}")
     result = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
@@ -454,10 +621,14 @@ def concat_videos(video_paths: List[str], output_path: str):
     except:
         pass
 
+    logger.info(f"   ffmpeg concat return code: {result.returncode}")
     if result.returncode != 0:
-        logger.error("❌ ffmpeg concat failed")
-        logger.error(result.stderr)
+        logger.error(f"   ❌ ffmpeg concat failed")
+        logger.error(f"   ffmpeg stderr: {result.stderr[:500]}")
         raise RuntimeError(f"ffmpeg concat error (code {result.returncode}) for {output_path}")
+    else:
+        file_size = os.path.getsize(output_path) / (1024 * 1024)
+        logger.info(f"   ✅ Concatenated video: {output_path} ({file_size:.2f} MB)")
 
 async def process_pdf_with_voice(pdf_path: str,
                            voice_data: List[Dict],
@@ -488,6 +659,10 @@ async def process_pdf_with_voice(pdf_path: str,
     img_dir = os.path.join(workdir, "images_tmp")
     image_paths = pdf_to_images(pdf_path, img_dir)
     logs.append(f"Converted PDF to {len(image_paths)} images.")
+
+    # B2. Add watermark to all slide images
+    add_watermark_to_images(image_paths)
+    logs.append("Added 'Generated By MyQAteam AI' watermark to all slides.")
 
     # C. Generate TTS audios
     audio_dir = os.path.join(workdir, "audio_tmp")
@@ -571,21 +746,26 @@ async def process_media_with_voice(media_path: str,
                             language_code: str = "fr-FR",
                             voice_name: str = None) -> tuple[List[Dict], List[str], Dict[str, float]]:
     """
-    Unified pipeline that handles both PDF and image files (JPG, PNG, GIF).
-    Treats images the same way as PDF pages to generate videos.
-    
-    - PDF: Extracts all pages as images
-    - Single Image (JPG, PNG): Treats as single page
-    - Animated GIF: Extracts all frames as pages
-    
-    Returns (results, logs, tts_usage)
+    Unified pipeline that handles both PDF and image files.
     """
+    logger.info(f"\n{'#'*80}")
+    logger.info(f"### process_media_with_voice STARTED")
+    logger.info(f"    media_path: {media_path}")
+    logger.info(f"    workdir: {workdir}")
+    logger.info(f"    min_sections: {min_sections}")
+    logger.info(f"    default_duration: {default_duration}")
+    logger.info(f"    language_code: {language_code}")
+    logger.info(f"    voice_name: {voice_name}")
+    logger.info(f"    voice_data items: {len(voice_data) if isinstance(voice_data, list) else 'dict'}")
+    logger.info(f"{'#'*80}")
+    
     os.makedirs(workdir, exist_ok=True)
     logs = []
     
     # Determine media type
     media_ext = os.path.splitext(media_path)[1].lower()
     is_pdf = media_ext == '.pdf'
+    logger.info(f"\n   File extension: {media_ext}, is_pdf: {is_pdf}")
     
     # A. Extract images based on file type
     img_dir = os.path.join(workdir, "images_tmp")
@@ -618,18 +798,26 @@ async def process_media_with_voice(media_path: str,
         logs.append(f"Extracted {num_pages} image(s) from {os.path.basename(media_path)}.")
     
     if not image_paths:
+        logger.error("   ❌ No images could be extracted from the media file.")
         raise ValueError("No images could be extracted from the media file.")
+
+    # A2. Add watermark to all slide images
+    add_watermark_to_images(image_paths)
+    logs.append("Added 'Generated By MyQAteam AI' watermark to all slides.")
     
     num_pages = len(image_paths)
+    logger.info(f"   Total image pages: {num_pages}")
     segments = build_uniform_segments(num_pages, min_sections=min_sections)
-    logger.info(f"📦 Segments : {segments}")
+    logger.info(f"   Segments: {segments}")
 
     # C. Generate TTS audios
+    logger.info(f"\n   🎙️  Step C: Generating TTS audios...")
     audio_dir = os.path.join(workdir, "audio_tmp")
     page_to_info, tts_logs, tts_usage = await generate_tts_audios(voice_data, audio_dir, language_code=language_code, voice_name=voice_name)
     logs.extend(tts_logs)
 
     # D. Build videos
+    logger.info(f"\n   🎬 Step D: Building slide videos...")
     slide_video_dir = os.path.join(workdir, "slides_tmp")
     os.makedirs(slide_video_dir, exist_ok=True)
 
@@ -638,13 +826,14 @@ async def process_media_with_voice(media_path: str,
     for seg in segments:
         start, end = seg["start"], seg["end"]
         pages_numbers = list(range(start + 1, end + 1))  # 1-based
-        logger.info(f"\n📚 Segment {seg['index']} -> pages {pages_numbers[0]} to {pages_numbers[-1]}")
+        logger.info(f"\n   📚 Segment {seg['index']} -> pages {pages_numbers[0]} to {pages_numbers[-1]}")
 
         segment_slide_videos = []
 
         for p in pages_numbers:
             # Ensure we don't go out of bounds
             if p - 1 >= len(image_paths):
+                logger.warning(f"      Page {p} is out of bounds (only {len(image_paths)} images). Skipping.")
                 break
                 
             img_path = image_paths[p - 1]
@@ -653,9 +842,11 @@ async def process_media_with_voice(media_path: str,
             if info is not None:
                 audio_path = info["audio_path"]
                 duration = info["duration"]
+                logger.info(f"      Page {p}: audio={'YES' if audio_path else 'NONE'}, duration={duration}s")
             else:
                 audio_path = None
                 duration = default_duration
+                logger.info(f"      Page {p}: no audio info, using silent default ({default_duration}s)")
                 logs.append(f"⚠️ No audio info for page {p}, using silent default.")
 
             slide_video_path = os.path.join(
@@ -671,12 +862,15 @@ async def process_media_with_voice(media_path: str,
                     output_path=slide_video_path
                 )
                 segment_slide_videos.append(slide_video_path)
+                logger.info(f"      ✅ Slide video created for page {p}")
             except Exception as e:
+                logger.error(f"      ❌ Failed to create video for page {p}: {e}")
                 logs.append(f"❌ Failed to create video for page {p}: {e}")
 
         # Concat segment
         if segment_slide_videos:
             final_segment_path = os.path.join(workdir, f"part_{seg['index']:02d}.mp4")
+            logger.info(f"      Concatenating {len(segment_slide_videos)} slide videos -> {final_segment_path}")
             try:
                 concat_videos(segment_slide_videos, final_segment_path)
 
@@ -685,14 +879,25 @@ async def process_media_with_voice(media_path: str,
                     "pages": pages_numbers,
                     "video_path": final_segment_path
                 })
+                logger.info(f"      ✅ Segment {seg['index']} concatenated successfully")
             except Exception as e:
+                logger.error(f"      ❌ Failed to concat segment {seg['index']}: {e}")
                 logs.append(f"❌ Failed to concat segment {seg['index']}: {e}")
+        else:
+            logger.warning(f"      ⚠️ No slide videos for segment {seg['index']}, skipping concat")
 
     # E. Cleanup
+    logger.info(f"\n   🧹 Step E: Cleaning up temporary files...")
     shutil.rmtree(img_dir, ignore_errors=True)
     shutil.rmtree(audio_dir, ignore_errors=True)
     shutil.rmtree(slide_video_dir, ignore_errors=True)
-    logger.info("\n🧹 Temporary files removed.")
+    logger.info(f"   ✅ Temporary files removed.")
+    
+    logger.info(f"\n{'#'*80}")
+    logger.info(f"### process_media_with_voice COMPLETED")
+    logger.info(f"    Results: {len(results)} video segments")
+    logger.info(f"    Logs: {len(logs)} entries")
+    logger.info(f"{'#'*80}\n")
 
     return results, logs, tts_usage
 
@@ -711,10 +916,20 @@ async def process_image_collection(image_paths: List[str],
     
     Returns (results, logs, tts_usage)
     """
+    logger.info(f"\n{'#'*80}")
+    logger.info(f"### process_image_collection STARTED")
+    logger.info(f"    image_paths: {image_paths}")
+    logger.info(f"    workdir: {workdir}")
+    logger.info(f"    min_sections: {min_sections}")
+    logger.info(f"    language_code: {language_code}")
+    logger.info(f"    voice_name: {voice_name}")
+    logger.info(f"    voice_data items: {len(voice_data) if isinstance(voice_data, list) else 'dict'}")
+    logger.info(f"{'#'*80}")
+    
     os.makedirs(workdir, exist_ok=True)
     logs = []
     
-    logger.info(f"🖼️  Processing collection of {len(image_paths)} image(s)...")
+    logger.info(f"\n🖼️  Processing collection of {len(image_paths)} image(s)...")
     logs.append(f"Processing collection of {len(image_paths)} image file(s).")
     
     # A. Convert all images to PNG format
@@ -764,6 +979,10 @@ async def process_image_collection(image_paths: List[str],
     
     if not all_image_paths:
         raise ValueError("No images could be processed from the collection.")
+
+    # A2. Add watermark to all slide images
+    add_watermark_to_images(all_image_paths)
+    logs.append("Added 'Generated By MyQAteam AI' watermark to all slides.")
     
     num_pages = len(all_image_paths)
     logger.info(f"🖼️  Total pages extracted: {num_pages}")
@@ -773,11 +992,13 @@ async def process_image_collection(image_paths: List[str],
     logger.info(f"📦 Segments : {segments}")
 
     # C. Generate TTS audios
+    logger.info(f"\n   🎙️  Step C: Generating TTS audios...")
     audio_dir = os.path.join(workdir, "audio_tmp")
     page_to_info, tts_logs, tts_usage = await generate_tts_audios(voice_data, audio_dir, language_code=language_code, voice_name=voice_name)
     logs.extend(tts_logs)
 
     # D. Build videos
+    logger.info(f"\n   🎬 Step D: Building slide videos...")
     slide_video_dir = os.path.join(workdir, "slides_tmp")
     os.makedirs(slide_video_dir, exist_ok=True)
 
@@ -786,13 +1007,14 @@ async def process_image_collection(image_paths: List[str],
     for seg in segments:
         start, end = seg["start"], seg["end"]
         pages_numbers = list(range(start + 1, end + 1))  # 1-based
-        logger.info(f"\n📚 Segment {seg['index']} -> pages {pages_numbers[0]} to {pages_numbers[-1]}")
+        logger.info(f"\n   📚 Segment {seg['index']} -> pages {pages_numbers[0]} to {pages_numbers[-1]}")
 
         segment_slide_videos = []
 
         for p in pages_numbers:
             # Ensure we don't go out of bounds
             if p - 1 >= len(all_image_paths):
+                logger.warning(f"      Page {p} is out of bounds (only {len(all_image_paths)} images). Skipping.")
                 break
                 
             img_path = all_image_paths[p - 1]
@@ -801,9 +1023,11 @@ async def process_image_collection(image_paths: List[str],
             if info is not None:
                 audio_path = info["audio_path"]
                 duration = info["duration"]
+                logger.info(f"      Page {p}: audio={'YES' if audio_path else 'NONE'}, duration={duration}s")
             else:
                 audio_path = None
                 duration = default_duration
+                logger.info(f"      Page {p}: no audio info, using silent default ({default_duration}s)")
                 logs.append(f"⚠️ No audio info for page {p}, using silent default.")
 
             slide_video_path = os.path.join(
@@ -819,12 +1043,15 @@ async def process_image_collection(image_paths: List[str],
                     output_path=slide_video_path
                 )
                 segment_slide_videos.append(slide_video_path)
+                logger.info(f"      ✅ Slide video created for page {p}")
             except Exception as e:
+                logger.error(f"      ❌ Failed to create video for page {p}: {e}")
                 logs.append(f"❌ Failed to create video for page {p}: {e}")
 
         # Concat segment
         if segment_slide_videos:
             final_segment_path = os.path.join(workdir, f"part_{seg['index']:02d}.mp4")
+            logger.info(f"      Concatenating {len(segment_slide_videos)} slide videos -> {final_segment_path}")
             try:
                 concat_videos(segment_slide_videos, final_segment_path)
 
@@ -833,13 +1060,24 @@ async def process_image_collection(image_paths: List[str],
                     "pages": pages_numbers,
                     "video_path": final_segment_path
                 })
+                logger.info(f"      ✅ Segment {seg['index']} concatenated successfully")
             except Exception as e:
+                logger.error(f"      ❌ Failed to concat segment {seg['index']}: {e}")
                 logs.append(f"❌ Failed to concat segment {seg['index']}: {e}")
+        else:
+            logger.warning(f"      ⚠️ No slide videos for segment {seg['index']}, skipping concat")
 
     # E. Cleanup
+    logger.info(f"\n   🧹 Step E: Cleaning up temporary files...")
     shutil.rmtree(img_dir, ignore_errors=True)
     shutil.rmtree(audio_dir, ignore_errors=True)
     shutil.rmtree(slide_video_dir, ignore_errors=True)
-    logger.info("\n🧹 Temporary files removed.")
+    logger.info(f"   ✅ Temporary files removed.")
+
+    logger.info(f"\n{'#'*80}")
+    logger.info(f"### process_image_collection COMPLETED")
+    logger.info(f"    Results: {len(results)} video segments")
+    logger.info(f"    Logs: {len(logs)} entries")
+    logger.info(f"{'#'*80}\n")
 
     return results, logs, tts_usage

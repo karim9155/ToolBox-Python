@@ -95,6 +95,7 @@ class SimpleSupabaseClient:
         return True
 
 # Initialize Supabase clients
+_supabase_local: Optional[SimpleSupabaseClient] = None
 _supabase_preprod: Optional[SimpleSupabaseClient] = None
 _supabase_prod: Optional[SimpleSupabaseClient] = None
 
@@ -109,14 +110,27 @@ def get_supabase_client(environment: str = None) -> SimpleSupabaseClient:
     Returns:
         SimpleSupabaseClient instance
     """
-    global _supabase_preprod, _supabase_prod
+    global _supabase_local, _supabase_preprod, _supabase_prod
     
     if environment is None:
         environment = os.getenv("DEPLOYMENT_ENV", "preprod")
     
     environment = environment.lower()
     
-    if environment == "preprod":
+    if environment == "local":
+        if _supabase_local is None:
+            url = os.getenv("SUPABASE_LOCAL_URL")
+            key = os.getenv("SUPABASE_LOCAL_SERVICE_ROLE_KEY")
+            
+            if not url or not key:
+                raise ValueError("Missing SUPABASE_LOCAL_URL or SUPABASE_LOCAL_SERVICE_ROLE_KEY")
+            
+            _supabase_local = SimpleSupabaseClient(url, key)
+            logger.info(f"✅ Connected to Supabase LOCAL: {url}")
+        
+        return _supabase_local
+    
+    elif environment == "preprod":
         if _supabase_preprod is None:
             url = os.getenv("SUPABASE_PREPROD_URL")
             key = os.getenv("SUPABASE_PREPROD_SERVICE_ROLE_KEY")
@@ -143,7 +157,7 @@ def get_supabase_client(environment: str = None) -> SimpleSupabaseClient:
         return _supabase_prod
     
     else:
-        raise ValueError(f"Invalid environment: {environment}. Must be 'preprod' or 'prod'")
+        raise ValueError(f"Invalid environment: {environment}. Must be 'local', 'preprod' or 'prod'")
 
 
 def upload_video_to_supabase(

@@ -2,9 +2,20 @@ from fastapi import FastAPI
 from app.routers import video, audio, audit, fssc, pdf, narrative, scraper
 from dotenv import load_dotenv
 import os
+import logging
 
-# Load environment variables from .env file
+# Load environment variables BEFORE importing routers/services
+# (services read env vars at import time)
 load_dotenv()
+
+from app.routers import video, audio, audit, fssc, pdf, narrative
+
+# Configure logging to show all details in console
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler()]
+)
 
 app = FastAPI(title="Toolbox API", version="1.0")
 

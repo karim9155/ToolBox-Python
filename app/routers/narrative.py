@@ -9,6 +9,7 @@ import threading
 import base64
 import time
 import traceback
+import logging
 from typing import List, Optional
 from app.services.narrative_video import process_media_with_voice, process_image_collection, generate_google_tts
 from app.utils.callback import (
@@ -18,6 +19,8 @@ from app.utils.callback import (
     update_job_status,
     get_job_status
 )
+
+logger = logging.getLogger("narrative.router")
 
 router = APIRouter()
 
@@ -93,21 +96,45 @@ async def generate_narrative_video(
     - voice_over: str
     - slide_title: str (optional)
     """
+    logger.info(f"\n{'='*80}")
+    logger.info(f"📥 /generate-narrative endpoint called")
+    logger.info(f"   Files received: {len(files)}")
+    for i, f in enumerate(files):
+        logger.info(f"     [{i+1}] {f.filename} (content_type={f.content_type})")
+    logger.info(f"   Language: {language}")
+    logger.info(f"   jobId: {jobId}")
+    logger.info(f"   callbackUrl: {callbackUrl}")
+    logger.info(f"   documentId: {documentId}")
+    logger.info(f"   projectId: {projectId}")
+    logger.info(f"   Script (first 200 chars): {script[:200]}...")
+    logger.info(f"{'='*80}")
+
     # Validate file types
     allowed_extensions = ('.pdf', '.jpg', '.jpeg', '.png', '.gif')
     for file in files:
         if not file.filename.lower().endswith(allowed_extensions):
+            logger.error(f"❌ Invalid file type: {file.filename}")
             raise HTTPException(status_code=400, detail=f"File '{file.filename}' must be one of: {', '.join(allowed_extensions)}")
 
     try:
         voice_data = json.loads(script)
-    except json.JSONDecodeError:
+        logger.info(f"✅ Script JSON parsed successfully")
+        if isinstance(voice_data, list):
+            logger.info(f"   Script contains {len(voice_data)} items")
+            for idx, item in enumerate(voice_data):
+                if isinstance(item, dict):
+                    pg = item.get('page_number', '?')
+                    vo = str(item.get('voice_over', ''))[:80]
+                    title = item.get('slide_title', '')
+                    logger.info(f"     Page {pg}: title='{title}', voice_over='{vo}...'")
+        elif isinstance(voice_data, dict) and 'data' in voice_data:
+            logger.info(f"   Script contains {len(voice_data['data'])} items (nested under 'data')")
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ Invalid JSON script: {e}")
         raise HTTPException(status_code=400, detail="Invalid JSON script")
 
     # Check if async callback mode is enabled
     if callbackUrl:
-        import logging
-        logger = logging.getLogger(__name__)
         logger.info(f"\n{'='*80}")
         logger.info(f"🚀 Async callback mode activated!")
         logger.info(f"   Callback URL: {callbackUrl[:60]}...")
@@ -175,8 +202,10 @@ async def generate_narrative_video(
         )
     
     # Synchronous mode (original behavior)
+    logger.info(f"\n🔄 Running in SYNCHRONOUS mode")
     # Create a temporary directory for processing
     temp_dir = tempfile.mkdtemp()
+    logger.info(f"📁 Temp directory created: {temp_dir}")
     
     try:
         # Handle single file vs multiple files
@@ -185,10 +214,18 @@ async def generate_narrative_video(
             file = files[0]
             file_ext = os.path.splitext(file.filename)[1].lower()
             saved_file_path = os.path.join(temp_dir, f"input{file_ext}")
+            logger.info(f"💾 Saving single file: {file.filename} -> {saved_file_path}")
             with open(saved_file_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
+            file_size = os.path.getsize(saved_file_path)
+            logger.info(f"   File saved: {file_size / 1024:.1f} KB")
                 
             # Process single media file
+            logger.info(f"\n🚀 Starting process_media_with_voice...")
+            logger.info(f"   media_path={saved_file_path}")
+            logger.info(f"   language_code={language}")
+            logger.info(f"   min_sections=3")
+            start_time = time.time()
             results, logs, tts_usage = await process_media_with_voice(
                 media_path=saved_file_path,
                 voice_data=voice_data,
@@ -196,17 +233,30 @@ async def generate_narrative_video(
                 min_sections=3,
                 language_code=language
             )
+            elapsed = time.time() - start_time
+            logger.info(f"\n✅ process_media_with_voice completed in {elapsed:.2f}s")
+            logger.info(f"   Results: {len(results)} video segments")
+            logger.info(f"   Logs: {len(logs)} entries")
+            logger.info(f"   TTS usage: {tts_usage}")
         else:
             # Multiple image files - save all and process as collection
             saved_files = []
+            logger.info(f"💾 Saving {len(files)} files...")
             for idx, file in enumerate(files):
                 file_ext = os.path.splitext(file.filename)[1].lower()
                 saved_file_path = os.path.join(temp_dir, f"image_{idx+1:03d}{file_ext}")
                 with open(saved_file_path, "wb") as buffer:
                     shutil.copyfileobj(file.file, buffer)
+                file_size = os.path.getsize(saved_file_path)
+                logger.info(f"   [{idx+1}] {file.filename} -> {saved_file_path} ({file_size / 1024:.1f} KB)")
                 saved_files.append(saved_file_path)
             
             # Process multiple images as a collection
+            logger.info(f"\n🚀 Starting process_image_collection...")
+            logger.info(f"   image_paths={saved_files}")
+            logger.info(f"   language_code={language}")
+            logger.info(f"   min_sections=3")
+            start_time = time.time()
             results, logs, tts_usage = await process_image_collection(
                 image_paths=saved_files,
                 voice_data=voice_data,
@@ -214,17 +264,32 @@ async def generate_narrative_video(
                 min_sections=3,
                 language_code=language
             )
+            elapsed = time.time() - start_time
+            logger.info(f"\n✅ process_image_collection completed in {elapsed:.2f}s")
+            logger.info(f"   Results: {len(results)} video segments")
+            logger.info(f"   Logs: {len(logs)} entries")
+            logger.info(f"   TTS usage: {tts_usage}")
 
         
         if not results:
+            logger.error(f"❌ No videos were generated!")
             raise HTTPException(status_code=500, detail="No videos were generated")
+        
+        # Log each generated video
+        logger.info(f"\n📹 Generated video segments:")
+        for res in results:
+            vp = res['video_path']
+            vsize = os.path.getsize(vp) / (1024 * 1024) if os.path.exists(vp) else 0
+            logger.info(f"   Segment {res['index']}: pages={res['pages']}, size={vsize:.2f} MB, path={vp}")
             
         # Zip the results
         zip_path = os.path.join(temp_dir, "narrative_videos.zip")
+        logger.info(f"\n📦 Creating ZIP archive: {zip_path}")
         with zipfile.ZipFile(zip_path, 'w') as zipf:
             for res in results:
                 video_path = res["video_path"]
                 arcname = os.path.basename(video_path)
+                logger.info(f"   Adding to zip: {arcname}")
                 zipf.write(video_path, arcname)
             
             # Add log report
@@ -232,12 +297,17 @@ async def generate_narrative_video(
             with open(report_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(logs))
             zipf.write(report_path, "generation_report.txt")
+            logger.info(f"   Adding to zip: generation_report.txt")
             
             # Add TTS usage/pricing report
             pricing_path = os.path.join(temp_dir, "tts_pricing.json")
             with open(pricing_path, "w", encoding="utf-8") as f:
                 json.dump(tts_usage, f, indent=2)
             zipf.write(pricing_path, "tts_pricing.json")
+            logger.info(f"   Adding to zip: tts_pricing.json")
+        
+        zip_size = os.path.getsize(zip_path) / (1024 * 1024)
+        logger.info(f"✅ ZIP created: {zip_size:.2f} MB")
         
         # Schedule cleanup after response
         background_tasks.add_task(cleanup_temp_dir, temp_dir)
@@ -249,6 +319,12 @@ async def generate_narrative_video(
             "X-TTS-Voice": str(tts_usage.get("voice_name", "unknown"))
         }
         
+        logger.info(f"\n📤 Sending response:")
+        logger.info(f"   X-TTS-Cost-USD: {headers['X-TTS-Cost-USD']}")
+        logger.info(f"   X-TTS-Characters: {headers['X-TTS-Characters']}")
+        logger.info(f"   X-TTS-Voice: {headers['X-TTS-Voice']}")
+        logger.info(f"{'='*80}\n")
+        
         return FileResponse(
             zip_path, 
             media_type="application/zip", 
@@ -257,6 +333,10 @@ async def generate_narrative_video(
         )
             
     except Exception as e:
+        logger.error(f"\n{'='*80}")
+        logger.error(f"❌ EXCEPTION in /generate-narrative: {type(e).__name__}: {e}")
+        logger.error(traceback.format_exc())
+        logger.error(f"{'='*80}\n")
         # If something goes wrong, clean up immediately
         cleanup_temp_dir(temp_dir)
         raise HTTPException(status_code=500, detail=str(e))
@@ -276,9 +356,6 @@ def _run_narrative_job_async(
     """
     Background thread function to process narrative video generation and send callback.
     """
-    import logging
-    logger = logging.getLogger(__name__)
-    
     logger.info(f"\n{'='*80}")
     logger.info(f"🎬 Starting background job: {job_id}")
     logger.info(f"   Files: {len(saved_files)}, Language: {language}")
@@ -347,8 +424,10 @@ def _run_narrative_job_async(
         logger.info(f"   TTS cost: ${tts_usage.get('total_cost_usd', 0):.4f}")
         logger.info(f"   TTS characters: {tts_usage.get('total_chars', 0)}")
         
-        # Determine environment from callback URL
-        environment = "prod" if "myqateam.ai" in callback_url and "preprod" not in callback_url else "preprod"
+        # Determine environment: use DEPLOYMENT_ENV if set, otherwise infer from callback URL
+        environment = os.getenv("DEPLOYMENT_ENV", "").lower()
+        if environment not in ("local", "preprod", "prod"):
+            environment = "prod" if "myqateam.ai" in callback_url and "preprod" not in callback_url else "preprod"
         logger.info(f"   Target environment: {environment.upper()}")
         
         # Update job status

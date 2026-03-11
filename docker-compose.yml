@@ -10,4 +10,7 @@ services:
       - .:/code
     environment:
       - ASSEMBLYAI_API_KEY=${ASSEMBLYAI_API_KEY:-c3e32648f5044e319c10eba6142bf280}
+      - GOOGLE_VERTEX_PROJECT=${GOOGLE_VERTEX_PROJECT}
+      - GOOGLE_VERTEX_LOCATION=${GOOGLE_VERTEX_LOCATION:-europe-west1}
+      - GOOGLE_APPLICATION_CREDENTIALS=/code/gen-lang-client-0637559951-6ab5fc474416.json
     restart: unless-stopped

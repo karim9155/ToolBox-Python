@@ -11,7 +11,7 @@ import time
 import traceback
 import logging
 from typing import List, Optional
-from app.services.narrative_video import process_media_with_voice, process_image_collection, generate_google_tts
+from app.services.narrative_video import process_media_with_voice, process_image_collection, generate_vertex_tts
 from app.utils.callback import (
     validate_callback_url,
     send_callback,
@@ -30,38 +30,57 @@ def cleanup_temp_dir(path: str):
     except Exception as e:
         print(f"Error cleaning up {path}: {e}")
 
+from fastapi import Query as FastAPIQuery
+
+DEFAULT_TEST_TEXTS = {
+    "fr-FR": "Ceci est un test de synthèse vocale Google.",
+    "en-US": "This is a Google text-to-speech test.",
+    "es-ES": "Esta es una prueba de síntesis de voz de Google.",
+    "de-DE": "Dies ist ein Google Text-to-Speech Test.",
+    "it-IT": "Questo è un test di sintesi vocale Google.",
+    "pt-BR": "Este é um teste de síntese de voz do Google.",
+}
+
 @router.get("/test-tts", tags=["Video"])
-async def test_tts_endpoint():
+async def test_tts_endpoint(
+    language: str = FastAPIQuery("fr-FR", description="Language code to test (e.g. en-US, fr-FR, es-ES)"),
+    voice: Optional[str] = FastAPIQuery(None, description="Override voice name (e.g. fr-FR-Chirp-HD-D). Leave empty for best default per language."),
+):
     """
-    Test endpoint to verify if Google TTS is working on the server.
+    Test endpoint to verify if Vertex AI TTS is working on the server.
+    Pass ?language=en-US to test a specific language.
     """
+    from app.services.narrative_video import DEFAULT_VOICES, _resolve_voice_name
     logs = []
-    logs.append("Testing Google Cloud TTS...")
-    
-    # 2. Try to generate audio
+    logs.append(f"Testing Vertex AI TTS for language={language}...")
+
+    resolved_voice = _resolve_voice_name(language, voice)
+    text = DEFAULT_TEST_TEXTS.get(language, f"This is a TTS test for language {language}.")
+
+    logs.append(f"Voice: {resolved_voice}")
+    logs.append(f"Text: {text}")
+
     temp_dir = tempfile.mkdtemp()
     audio_path = os.path.join(temp_dir, "test.mp3")
-    voice = "fr-FR-Neural2-B"
-    text = "Ceci est un test de synthèse vocale Google."
     
     try:
-        logs.append(f"Attempting to generate audio with {voice}...")
-        await generate_google_tts(text, audio_path, voice_name=voice)
+        logs.append(f"Attempting to generate audio with Vertex AI TTS ({resolved_voice})...")
+        await generate_vertex_tts(text, audio_path, language_code=language, voice_name=resolved_voice)
         
         if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
-            logs.append("✅ Audio generated successfully.")
-            # Clean up
+            size_kb = os.path.getsize(audio_path) / 1024
+            logs.append(f"✅ Audio generated successfully ({size_kb:.1f} KB).")
             shutil.rmtree(temp_dir)
-            return {"status": "success", "logs": logs}
+            return {"status": "success", "language": language, "voice": resolved_voice, "logs": logs}
         else:
             logs.append("❌ Audio file is empty or missing.")
             shutil.rmtree(temp_dir)
-            return {"status": "failed", "logs": logs}
+            return {"status": "failed", "language": language, "voice": resolved_voice, "logs": logs}
             
     except Exception as e:
         logs.append(f"❌ TTS Generation failed: {e}")
         shutil.rmtree(temp_dir)
-        return {"status": "error", "logs": logs}
+        return {"status": "error", "language": language, "voice": resolved_voice, "error": str(e), "logs": logs}
 
 @router.post("/generate-narrative", tags=["Video"])
 async def generate_narrative_video(
@@ -316,7 +335,8 @@ async def generate_narrative_video(
         headers = {
             "X-TTS-Cost-USD": str(tts_usage.get("total_cost_usd", 0)),
             "X-TTS-Characters": str(tts_usage.get("total_chars", 0)),
-            "X-TTS-Voice": str(tts_usage.get("voice_name", "unknown"))
+            "X-TTS-Voice": str(tts_usage.get("voice_name", "unknown")),
+            "X-TTS-Failed-Pages": str(tts_usage.get("failed_pages", 0)),
         }
         
         logger.info(f"\n📤 Sending response:")

@@ -1,5 +1,4 @@
 from fastapi import FastAPI
-from app.routers import video, audio, audit, fssc, pdf, narrative, scraper
 from dotenv import load_dotenv
 import os
 import logging
@@ -8,7 +7,7 @@ import logging
 # (services read env vars at import time)
 load_dotenv()
 
-from app.routers import video, audio, audit, fssc, pdf, narrative
+from app.routers import video, audio, audit, fssc, pdf, narrative, scraper
 
 # Configure logging to show all details in console
 logging.basicConfig(
@@ -36,6 +35,7 @@ def root():
         "POST /extract/fssc": "multipart form-data field 'file' -> json",
         "POST /extract/pdf-images": "multipart form-data field 'file' -> json (with base64 images)",
         "POST /generate-narrative": "multipart form-data field 'file' (PDF) + 'script' (JSON) -> zip (videos)",
+        "POST /video-to-gif": "multipart form-data field 'file' (video) + optional query params (fps, width, max_duration) -> image/gif",
         # Scraper endpoints
         "POST /scrape/eurlex/search": "json {query, max_results} -> EUR-Lex search results",
         "GET /scrape/eurlex/document/{celex}": "EUR-Lex document by CELEX number",

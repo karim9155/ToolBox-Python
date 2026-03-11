@@ -6,8 +6,8 @@ import json
 from typing import List, Dict
 import logging
 import asyncio
-import requests
-import base64
+from google.cloud import texttospeech_v1beta1 as texttospeech
+from google.api_core.client_options import ClientOptions
 from PIL import Image
 
 import pdfplumber
@@ -115,42 +115,92 @@ def add_watermark_to_images(image_paths: List[str]) -> None:
             logger.warning(f"   ⚠️ Could not watermark {img_path}: {e}")
 
 
-# Google Cloud TTS Configuration
-# Key is now loaded from environment variable for security
-GOOGLE_TTS_API_KEY = os.getenv("GOOGLE_TTS_API_KEY")
-GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
+# ---------------------------------------------------------------------------
+# Vertex AI TTS Configuration – Chirp 3: HD Voices
+# Uses service-account auth (GOOGLE_APPLICATION_CREDENTIALS) and a regional
+# EU endpoint so that audio data never leaves the EU.
+# ---------------------------------------------------------------------------
+VERTEX_PROJECT = os.getenv("GOOGLE_VERTEX_PROJECT")
+VERTEX_LOCATION = os.getenv("GOOGLE_VERTEX_LOCATION", "europe-west1")
 
-# Default voices for common languages
+_TTS_CLIENT: texttospeech.TextToSpeechClient | None = None
+
+def _get_tts_client() -> texttospeech.TextToSpeechClient:
+    """Lazy-initialise a regional Vertex AI TTS client (EU endpoint)."""
+    global _TTS_CLIENT
+    if _TTS_CLIENT is None:
+        endpoint = f"{VERTEX_LOCATION}-texttospeech.googleapis.com"
+        logger.info(f"🔊 Initialising Vertex AI TTS client → {endpoint}")
+        opts = ClientOptions(api_endpoint=endpoint)
+        _TTS_CLIENT = texttospeech.TextToSpeechClient(client_options=opts)
+    return _TTS_CLIENT
+
+# Chirp HD default suffix.  D = Male, F = Female, O = Female (alt).
+DEFAULT_CHIRP_SUFFIX = "F"
+
+# Best available voice per language on the europe-west1 endpoint.
+# Languages with Chirp-HD get the high-quality model; others fall back
+# to the best Neural2 / Wavenet voice available.
 DEFAULT_VOICES = {
-    "fr-FR": "fr-FR-Studio-D",
-    "en-US": "en-US-Studio-M",
-    "es-ES": "es-ES-Studio-C",
-    "de-DE": "de-DE-Studio-B",
-    "it-IT": "it-IT-Neural2-A",
+    # ── Chirp HD languages (highest quality) ──
+    "fr-FR": "fr-FR-Chirp-HD-F",
+    "fr-CA": "fr-CA-Chirp-HD-F",
+    "en-US": "en-US-Chirp-HD-F",
+    "en-GB": "en-GB-Chirp-HD-F",
+    "en-AU": "en-AU-Chirp-HD-F",
+    "en-IN": "en-IN-Chirp-HD-F",
+    "es-ES": "es-ES-Chirp-HD-F",
+    "es-US": "es-US-Chirp-HD-F",
+    "de-DE": "de-DE-Chirp-HD-F",
+    "it-IT": "it-IT-Chirp-HD-F",
+    # ── Neural2 / Wavenet fallback ──
     "pt-BR": "pt-BR-Neural2-A",
     "ja-JP": "ja-JP-Neural2-B",
     "ko-KR": "ko-KR-Neural2-A",
-    "zh-CN": "cmn-CN-Wavenet-A", # Studio/Neural2 availability varies for CN
+    "zh-CN": "cmn-CN-Wavenet-A",
+    "ar-XA": "ar-XA-Wavenet-A",
+    "hi-IN": "hi-IN-Neural2-A",
+    "nl-NL": "nl-NL-Wavenet-F",
+    "pl-PL": "pl-PL-Wavenet-F",
+    "ru-RU": "ru-RU-Wavenet-A",
+    "tr-TR": "tr-TR-Wavenet-A",
 }
+
+def _resolve_voice_name(language_code: str, voice_name: str | None = None) -> str:
+    """
+    Resolve the full wire voice name for a language.
+    If *voice_name* is already a full wire name (contains '-'), return as-is.
+    If it is a Chirp HD suffix letter (D/F/O), build the Chirp-HD name.
+    Otherwise fall back to DEFAULT_VOICES or a Neural2-A guess.
+    """
+    if voice_name and "-" in voice_name:
+        # Already a full wire name like 'fr-FR-Chirp-HD-F'
+        return voice_name
+    if voice_name and voice_name in ("D", "F", "O"):
+        return f"{language_code}-Chirp-HD-{voice_name}"
+    if voice_name:
+        # Unknown short name; try as Chirp-HD suffix
+        return f"{language_code}-Chirp-HD-{voice_name}"
+    # No voice specified: use default mapping
+    return DEFAULT_VOICES.get(language_code, f"{language_code}-Neural2-A")
 
 def calculate_tts_cost(char_count: int, voice_name: str) -> float:
     """
-    Estimates the cost of Google TTS usage based on character count and voice type.
-    Pricing (approximate USD per 1M chars):
-    - Studio: $160.00
-    - Neural2: $16.00
-    - WaveNet: $16.00
-    - Standard: $4.00
+    Estimates cost for Vertex AI TTS.
+    Pricing (approximate USD per 1 M characters, 2025-Q4):
+    - Chirp HD : $30
+    - Neural2  : $16
+    - Wavenet  : $16
+    - Standard : $4
     """
-    cost_per_million = 4.0 # Default/Standard
-    
-    if "Studio" in voice_name:
-        cost_per_million = 160.0
+    if "Chirp" in voice_name:
+        cost_per_million = 30.0
     elif "Neural2" in voice_name:
         cost_per_million = 16.0
     elif "Wavenet" in voice_name:
         cost_per_million = 16.0
-        
+    else:
+        cost_per_million = 4.0
     cost = (char_count / 1_000_000) * cost_per_million
     return round(cost, 6)
 
@@ -323,59 +373,56 @@ def extract_images_from_directory(dir_path: str) -> List[str]:
     return image_files
 
 
-async def generate_google_tts(text: str, output_path: str, language_code: str = "fr-FR", voice_name: str = "fr-FR-Neural2-B"):
+async def generate_vertex_tts(text: str, output_path: str, language_code: str = "fr-FR", voice_name: str = None):
     """
-    Generates audio using Google Cloud Text-to-Speech API.
+    Generates audio using Vertex AI TTS (Chirp HD / Neural2 / Wavenet)
+    via the google-cloud-texttospeech SDK.  The client is pinned to the
+    EU regional endpoint configured by GOOGLE_VERTEX_LOCATION.
     """
-    logger.info(f"\n🎵 generate_google_tts called")
+    full_voice_name = _resolve_voice_name(language_code, voice_name)
+
+    logger.info(f"\n🎵 generate_vertex_tts called")
     logger.info(f"   Text ({len(text)} chars): '{text[:100]}...'")
     logger.info(f"   Output path: {output_path}")
-    logger.info(f"   Language: {language_code}, Voice: {voice_name}")
-    
-    headers = {"Content-Type": "application/json; charset=utf-8"}
-    data = {
-        "input": {"text": text},
-        "voice": {"languageCode": language_code, "name": voice_name},
-        "audioConfig": {"audioEncoding": "MP3"}
-    }
-    params = {"key": GOOGLE_TTS_API_KEY}
+    logger.info(f"   Language: {language_code}, Voice: {full_voice_name}")
 
-    if not GOOGLE_TTS_API_KEY:
-        logger.error("   ❌ GOOGLE_TTS_API_KEY not set!")
-        raise RuntimeError("GOOGLE_TTS_API_KEY environment variable is not set.")
+    client = _get_tts_client()
 
-    logger.info(f"   Sending request to Google TTS API...")
+    synthesis_input = texttospeech.SynthesisInput(text=text)
+    voice_params = texttospeech.VoiceSelectionParams(
+        language_code=language_code,
+        name=full_voice_name,
+    )
+    audio_config = texttospeech.AudioConfig(
+        audio_encoding=texttospeech.AudioEncoding.MP3,
+    )
 
-    def _request():
-        return requests.post(GOOGLE_TTS_URL, headers=headers, json=data, params=params)
+    def _synthesize():
+        return client.synthesize_speech(
+            input=synthesis_input,
+            voice=voice_params,
+            audio_config=audio_config,
+        )
 
-    # Run blocking request in a separate thread
-    response = await asyncio.to_thread(_request)
-    logger.info(f"   Response status: {response.status_code}")
+    logger.info(f"   Sending request to Vertex AI TTS ({VERTEX_LOCATION})...")
+    response = await asyncio.to_thread(_synthesize)
 
-    if response.status_code == 200:
-        response_json = response.json()
-        audio_content = response_json.get("audioContent")
-        if audio_content:
-            # Ensure output directory exists
-            output_dir = os.path.dirname(output_path)
-            if output_dir:  # Only create directory if there is one
-                os.makedirs(output_dir, exist_ok=True)
-            with open(output_path, "wb") as f:
-                f.write(base64.b64decode(audio_content))
-            file_size = os.path.getsize(output_path)
-            logger.info(f"   ✅ Audio saved: {output_path} ({file_size} bytes, {file_size/1024:.1f} KB)")
-            return True
-        else:
-            logger.error(f"   ❌ No audio content in response: {response_json}")
-            raise RuntimeError(f"No audio content in Google TTS response. Response: {response_json}")
+    if response.audio_content:
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(response.audio_content)
+        file_size = os.path.getsize(output_path)
+        logger.info(f"   ✅ Audio saved: {output_path} ({file_size} bytes, {file_size/1024:.1f} KB)")
+        return True
     else:
-        logger.error(f"   ❌ Google TTS API Error ({response.status_code}): {response.text}")
-        raise RuntimeError(f"Google TTS API Error ({response.status_code}): {response.text}")
+        logger.error("   ❌ No audio content in Vertex AI TTS response")
+        raise RuntimeError("No audio content in Vertex AI TTS response")
 
 async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_code: str = "fr-FR", voice_name: str = None) -> tuple[Dict[int, Dict], List[str], Dict[str, float]]:
     """
-    Generates MP3 for each slide using Google Cloud TTS.
+    Generates MP3 for each slide using Vertex AI Chirp 3: HD Voices.
     Returns: (page_to_info_map, list_of_log_messages, tts_usage_info)
     """
     logger.info(f"\n{'='*60}")
@@ -386,17 +433,13 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
     os.makedirs(audio_dir, exist_ok=True)
     page_to_info = {}
     logs = []
+    tts_errors = []  # Collect per-page error messages for diagnostics
     total_chars = 0
     
-    # Determine voice name from parameter, language code, or fallback
-    if not voice_name:
-        voice_name = DEFAULT_VOICES.get(language_code)
-        if not voice_name:
-            voice_name = f"{language_code}-Neural2-A"
-            logger.warning(f"   ⚠️ Unknown language {language_code}, using fallback voice {voice_name}")
-            logs.append(f"⚠️ Unknown language {language_code}, trying fallback voice {voice_name}")
-        else:
-            logger.info(f"   Selected default voice: {voice_name}")
+    # Determine short Chirp 3 HD voice name
+    # Resolve the full wire voice name
+    voice_name = _resolve_voice_name(language_code, voice_name)
+    logger.info(f"   Resolved voice: {voice_name}")
 
     # Handle nested structure if present
     data_list = voice_data
@@ -407,8 +450,8 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
         data_list = voice_data["data"]
         logger.info(f"   Unwrapped 'data' key from voice_data dict")
     
-    logger.info(f"   Processing {len(data_list)} items from voice_data using Google TTS ({language_code} / {voice_name}).")
-    logs.append(f"Processing {len(data_list)} items from voice_data using Google TTS ({language_code} / {voice_name}).")
+    logger.info(f"   Processing {len(data_list)} items using Vertex AI TTS ({language_code} / {voice_name}).")
+    logs.append(f"Processing {len(data_list)} items using Vertex AI TTS ({language_code} / {voice_name}).")
 
     for item_idx, item in enumerate(data_list):
         if not isinstance(item, dict):
@@ -446,7 +489,7 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
         try:
             logs.append(f"Page {page_num} text ({len(text)} chars): {text[:50]}...")
 
-            await generate_google_tts(text, audio_path, language_code=language_code, voice_name=voice_name)
+            await generate_vertex_tts(text, audio_path, language_code=language_code, voice_name=voice_name)
 
             # Verify file size
             if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
@@ -473,6 +516,7 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
             msg = f"❌ Failed to generate TTS for page {page_num}: {e}"
             logger.error(f"      {msg}")
             logs.append(msg)
+            tts_errors.append(f"page {page_num}: {e}")
             duration = 5.0 # Fallback
             audio_path = None 
 
@@ -484,10 +528,13 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
         logger.info(f"      page_to_info[{page_num}] = audio={audio_path is not None}, duration={duration}, title='{title}'")
 
     total_cost = calculate_tts_cost(total_chars, voice_name)
+    failed_pages = sum(1 for info in page_to_info.values() if info["audio_path"] is None)
     tts_usage = {
         "total_chars": total_chars,
         "total_cost_usd": total_cost,
-        "voice_name": voice_name
+        "voice_name": voice_name,
+        "failed_pages": failed_pages,
+        "errors": tts_errors,
     }
     
     logger.info(f"\n   💰 TTS Usage Summary:")
@@ -495,6 +542,9 @@ async def generate_tts_audios(voice_data: List[Dict], audio_dir: str, language_c
     logger.info(f"      Estimated cost: ${total_cost:.6f}")
     logger.info(f"      Voice: {voice_name}")
     logger.info(f"      Pages processed: {len(page_to_info)}")
+    logger.info(f"      Failed pages: {failed_pages}")
+    if tts_errors:
+        logger.error(f"      TTS errors: {tts_errors}")
     logger.info(f"{'='*60}\n")
     
     return page_to_info, logs, tts_usage
@@ -816,6 +866,11 @@ async def process_media_with_voice(media_path: str,
     page_to_info, tts_logs, tts_usage = await generate_tts_audios(voice_data, audio_dir, language_code=language_code, voice_name=voice_name)
     logs.extend(tts_logs)
 
+    # Fail early if every single slide failed TTS — no point building silent 5-sec clips
+    if page_to_info and all(info["audio_path"] is None for info in page_to_info.values()):
+        first_error = tts_usage["errors"][0] if tts_usage.get("errors") else "Unknown TTS error"
+        raise RuntimeError(f"TTS generation failed for all slides. First error: {first_error}")
+
     # D. Build videos
     logger.info(f"\n   🎬 Step D: Building slide videos...")
     slide_video_dir = os.path.join(workdir, "slides_tmp")
@@ -996,6 +1051,11 @@ async def process_image_collection(image_paths: List[str],
     audio_dir = os.path.join(workdir, "audio_tmp")
     page_to_info, tts_logs, tts_usage = await generate_tts_audios(voice_data, audio_dir, language_code=language_code, voice_name=voice_name)
     logs.extend(tts_logs)
+
+    # Fail early if every single slide failed TTS — no point building silent 5-sec clips
+    if page_to_info and all(info["audio_path"] is None for info in page_to_info.values()):
+        first_error = tts_usage["errors"][0] if tts_usage.get("errors") else "Unknown TTS error"
+        raise RuntimeError(f"TTS generation failed for all slides. First error: {first_error}")
 
     # D. Build videos
     logger.info(f"\n   🎬 Step D: Building slide videos...")

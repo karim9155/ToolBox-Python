@@ -15,6 +15,7 @@ from app.services.narrative_video import process_media_with_voice, process_image
 from app.utils.callback import (
     validate_callback_url,
     send_callback,
+    send_progress_callback,
     register_job,
     update_job_status,
     get_job_status
@@ -384,6 +385,13 @@ def _run_narrative_job_async(
     
     start_time = time.time()
     
+    # Build a closure the video service can call to report progress
+    def _progress(step_key: str):
+        send_progress_callback(
+            callback_url, callback_secret, job_id, step_key,
+            document_id=document_id, project_id=project_id,
+        )
+    
     try:
         # Determine processing mode
         if len(saved_files) == 1:
@@ -400,7 +408,8 @@ def _run_narrative_job_async(
                     voice_data=voice_data,
                     workdir=temp_dir,
                     min_sections=3,
-                    language_code=language
+                    language_code=language,
+                    progress_callback=_progress
                 )
             )
             loop.close()
@@ -419,7 +428,8 @@ def _run_narrative_job_async(
                     voice_data=voice_data,
                     workdir=temp_dir,
                     min_sections=3,
-                    language_code=language
+                    language_code=language,
+                    progress_callback=_progress
                 )
             )
             loop.close()
@@ -451,6 +461,7 @@ def _run_narrative_job_async(
         logger.info(f"   Target environment: {environment.upper()}")
         
         # Update job status
+        _progress("uploading")
         update_job_status(job_id, "uploading", videoCount=len(results))
         
         # Import Supabase upload function
@@ -598,6 +609,11 @@ async def get_narrative_job_status(job_id: str):
     return {
         "jobId": job_id,
         "status": job_status.get("status"),
+        "step": job_status.get("step"),
+        "stepNumber": job_status.get("stepNumber"),
+        "totalSteps": job_status.get("totalSteps"),
+        "progressMessage": job_status.get("progressMessage"),
+        "progressDetail": job_status.get("progressDetail"),
         "createdAt": job_status.get("createdAt"),
         "updatedAt": job_status.get("updatedAt"),
         "fileCount": job_status.get("fileCount"),

@@ -72,14 +72,61 @@ def _paste_watermark(img: Image.Image) -> Image.Image:
     return img
 
 
+def _add_watermark_to_mp4(mp4_path: str) -> None:
+    """Overlays the watermark PNG onto an MP4 file using ffmpeg, replacing it in-place.
+
+    Scales the watermark to 20 % of the video width and composites it in the
+    bottom-right corner (20 px margin) — matching the PIL watermark behaviour.
+    Falls back gracefully (logs a warning) if the watermark PNG is unavailable
+    or if ffmpeg fails, so the overall pipeline is never blocked.
+    """
+    if not os.path.exists(_WATERMARK_PNG_PATH):
+        logger.warning(f"   ⚠️ Watermark PNG not found, skipping MP4 watermark: {mp4_path}")
+        return
+
+    tmp_output = mp4_path + ".wm.mp4"
+    try:
+        # Scale watermark to 20% of video width then overlay bottom-right with 20px margin
+        filtergraph = (
+            "[1:v]scale=iw/5:-1[wm];"
+            "[0:v][wm]overlay=main_w-overlay_w-20:main_h-overlay_h-20"
+        )
+        cmd = [
+            _FFMPEG_PATH, "-y",
+            "-i", mp4_path,
+            "-i", _WATERMARK_PNG_PATH,
+            "-filter_complex", filtergraph,
+            "-c:v", "libx264",
+            "-c:a", "copy",
+            "-pix_fmt", "yuv420p",
+            tmp_output,
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            logger.warning(f"   ⚠️ ffmpeg watermark overlay failed for {mp4_path}: {result.stderr[-300:]}")
+            return
+        os.replace(tmp_output, mp4_path)
+        logger.info(f"   ✅ Watermarked MP4 (ffmpeg overlay): {mp4_path}")
+    except Exception as e:
+        logger.warning(f"   ⚠️ Could not watermark MP4 {mp4_path}: {e}")
+        if os.path.exists(tmp_output):
+            try:
+                os.remove(tmp_output)
+            except Exception:
+                pass
+
+
 def add_watermark_to_images(image_paths: List[str]) -> None:
     """
     Stamps the SVG watermark on every image file in *image_paths* (in-place).
-    Handles static images (PNG/JPG) and animated GIFs.
+    Handles static images (PNG/JPG), animated GIFs, and MP4 files.
     """
     logger.info(f"\n🏷️  Adding watermark to {len(image_paths)} image(s)...")
     for img_path in image_paths:
         try:
+            if img_path.lower().endswith('.mp4'):
+                _add_watermark_to_mp4(img_path)
+                continue
             img = Image.open(img_path)
             is_animated = getattr(img, "is_animated", False) or (
                 hasattr(img, "n_frames") and img.n_frames > 1
@@ -311,8 +358,9 @@ def pdf_to_images(pdf_path: str, out_dir: str, dpi: int = 150) -> List[str]:
 
 def normalize_images(image_path: str, out_dir: str) -> List[str]:
     """
-    Handles single image files (JPG, PNG, GIF).
-    If it's an animated GIF, it is PRESERVED as a single file (not split).
+    Handles single image/video files (JPG, PNG, GIF, MP4).
+    Animated GIFs and MP4s are PRESERVED as single files (not split) — they are
+    looped for the duration of the voiceover during slide video rendering.
     Static images are converted to PNG.
     Returns a list of file paths.
     """
@@ -321,7 +369,14 @@ def normalize_images(image_path: str, out_dir: str) -> List[str]:
     logger.info(f"   Output dir: {out_dir}")
     os.makedirs(out_dir, exist_ok=True)
     paths = []
-    
+
+    # MP4 input — preserve as-is; will be looped like a GIF during slide rendering
+    if image_path.lower().endswith('.mp4'):
+        out_path = os.path.join(out_dir, "page_001.mp4")
+        shutil.copy2(image_path, out_path)
+        logger.info(f"   MP4 detected. Copied as looping slide: {out_path}")
+        return [out_path]
+
     try:
         img = Image.open(image_path)
         logger.info(f"   Image opened: {img.format}, size={img.size}, mode={img.mode}")
@@ -566,9 +621,12 @@ def create_single_slide_video(image_path: str,
     logger.info(f"   Duration: {duration}s")
     logger.info(f"   Output: {output_path}")
     
-    # Check if input is a GIF
-    is_gif = image_path.lower().endswith('.gif')
-    logger.info(f"   Is GIF: {is_gif}")
+    # Check if input is a looping source (animated GIF or MP4 — both use stream_loop)
+    is_looping_input = (
+        image_path.lower().endswith('.gif') or
+        image_path.lower().endswith('.mp4')
+    )
+    logger.info(f"   Is looping input (GIF/MP4): {is_looping_input}")
 
     # Ensure duration is at least something small to avoid ffmpeg errors
     if duration <= 0:
@@ -576,8 +634,8 @@ def create_single_slide_video(image_path: str,
 
     # Build input arguments
     input_args = []
-    if is_gif:
-        # Loop the GIF indefinitely
+    if is_looping_input:
+        # Loop the GIF/MP4 indefinitely; -t will cut it at the right duration
         input_args = ["-stream_loop", "-1", "-i", image_path]
     else:
         # Loop static image
@@ -1017,9 +1075,19 @@ async def process_image_collection(image_paths: List[str],
         logs.append(f"Processing image {idx + 1}: {os.path.basename(image_path)}")
         
         try:
+            # MP4 input — preserve as-is; looped like a GIF during slide rendering
+            if image_path.lower().endswith('.mp4'):
+                out_path = os.path.join(img_dir, f"page_{image_counter:03d}.mp4")
+                shutil.copy2(image_path, out_path)
+                logger.info(f"  → MP4 detected. Preserved as looping slide: {out_path}")
+                logs.append(f"  → MP4 preserved as looping slide.")
+                all_image_paths.append(out_path)
+                image_counter += 1
+                continue
+
             # Each image file might be a regular image or animated GIF
             img = Image.open(image_path)
-            
+
             # Check if it's an animated GIF
             is_animated = False
             if getattr(img, "is_animated", False):

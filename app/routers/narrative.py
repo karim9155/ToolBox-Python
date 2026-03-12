@@ -86,7 +86,7 @@ async def test_tts_endpoint(
 @router.post("/generate-narrative", tags=["Video"])
 async def generate_narrative_video(
     background_tasks: BackgroundTasks,
-    files: List[UploadFile] = File(..., description="PDF or image files (PDF, JPG, PNG, GIF)"),
+    files: List[UploadFile] = File(..., description="PDF or image files (PDF, JPG, PNG, GIF, MP4)"),
     script: str = Form(..., description="JSON string containing the voice data script"),
     language: str = Form("fr-FR", description="Language code for TTS (e.g., en-US, fr-FR, es-ES)"),
     jobId: Optional[str] = Form(None, description="Unique job identifier for async callback workflow"),
@@ -104,12 +104,13 @@ async def generate_narrative_video(
     **Async Mode** (when callbackUrl provided):
     Returns HTTP 202 immediately and POSTs results to callbackUrl when complete.
     
-    Supported file types: PDF, JPG, JPEG, PNG, GIF
+    Supported file types: PDF, JPG, JPEG, PNG, GIF, MP4
     
     You can provide:
     - A single PDF file
     - A single image file (JPG, PNG) or animated GIF
-    - Multiple image files (will be processed in order)
+    - A single MP4 video (looped for the duration of the voiceover, like an animated GIF)
+    - Multiple image/GIF/MP4 files (will be processed in order, each as one looping slide)
     
     The script should be a JSON array of objects with:
     - page_number: int
@@ -130,7 +131,7 @@ async def generate_narrative_video(
     logger.info(f"{'='*80}")
 
     # Validate file types
-    allowed_extensions = ('.pdf', '.jpg', '.jpeg', '.png', '.gif')
+    allowed_extensions = ('.pdf', '.jpg', '.jpeg', '.png', '.gif', '.mp4')
     for file in files:
         if not file.filename.lower().endswith(allowed_extensions):
             logger.error(f"❌ Invalid file type: {file.filename}")

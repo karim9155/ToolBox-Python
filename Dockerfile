@@ -2,11 +2,12 @@ FROM mcr.microsoft.com/playwright/python:v1.41.0-jammy
 
 WORKDIR /code
 
-# Install system dependencies for OpenCV, ffmpeg, and Tesseract
+# Install system dependencies for OpenCV, ffmpeg, Tesseract, and LibreOffice
 RUN apt-get update && apt-get install -y \
     libgl1-mesa-glx \
     ffmpeg \
     tesseract-ocr \
+    libreoffice \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

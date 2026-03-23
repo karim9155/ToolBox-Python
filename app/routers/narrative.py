@@ -11,10 +11,11 @@ import time
 import traceback
 import logging
 from typing import List, Optional
-from app.services.narrative_video import process_media_with_voice, process_image_collection, generate_google_tts
+from app.services.narrative_video import process_media_with_voice, process_image_collection, generate_vertex_tts
 from app.utils.callback import (
     validate_callback_url,
     send_callback,
+    send_progress_callback,
     register_job,
     update_job_status,
     get_job_status
@@ -30,43 +31,62 @@ def cleanup_temp_dir(path: str):
     except Exception as e:
         print(f"Error cleaning up {path}: {e}")
 
+from fastapi import Query as FastAPIQuery
+
+DEFAULT_TEST_TEXTS = {
+    "fr-FR": "Ceci est un test de synthèse vocale Google.",
+    "en-US": "This is a Google text-to-speech test.",
+    "es-ES": "Esta es una prueba de síntesis de voz de Google.",
+    "de-DE": "Dies ist ein Google Text-to-Speech Test.",
+    "it-IT": "Questo è un test di sintesi vocale Google.",
+    "pt-BR": "Este é um teste de síntese de voz do Google.",
+}
+
 @router.get("/test-tts", tags=["Video"])
-async def test_tts_endpoint():
+async def test_tts_endpoint(
+    language: str = FastAPIQuery("fr-FR", description="Language code to test (e.g. en-US, fr-FR, es-ES)"),
+    voice: Optional[str] = FastAPIQuery(None, description="Override voice name (e.g. fr-FR-Chirp-HD-D). Leave empty for best default per language."),
+):
     """
-    Test endpoint to verify if Google TTS is working on the server.
+    Test endpoint to verify if Vertex AI TTS is working on the server.
+    Pass ?language=en-US to test a specific language.
     """
+    from app.services.narrative_video import DEFAULT_VOICES, _resolve_voice_name
     logs = []
-    logs.append("Testing Google Cloud TTS...")
-    
-    # 2. Try to generate audio
+    logs.append(f"Testing Vertex AI TTS for language={language}...")
+
+    resolved_voice = _resolve_voice_name(language, voice)
+    text = DEFAULT_TEST_TEXTS.get(language, f"This is a TTS test for language {language}.")
+
+    logs.append(f"Voice: {resolved_voice}")
+    logs.append(f"Text: {text}")
+
     temp_dir = tempfile.mkdtemp()
     audio_path = os.path.join(temp_dir, "test.mp3")
-    voice = "fr-FR-Neural2-B"
-    text = "Ceci est un test de synthèse vocale Google."
     
     try:
-        logs.append(f"Attempting to generate audio with {voice}...")
-        await generate_google_tts(text, audio_path, voice_name=voice)
+        logs.append(f"Attempting to generate audio with Vertex AI TTS ({resolved_voice})...")
+        await generate_vertex_tts(text, audio_path, language_code=language, voice_name=resolved_voice)
         
         if os.path.exists(audio_path) and os.path.getsize(audio_path) > 0:
-            logs.append("✅ Audio generated successfully.")
-            # Clean up
+            size_kb = os.path.getsize(audio_path) / 1024
+            logs.append(f"✅ Audio generated successfully ({size_kb:.1f} KB).")
             shutil.rmtree(temp_dir)
-            return {"status": "success", "logs": logs}
+            return {"status": "success", "language": language, "voice": resolved_voice, "logs": logs}
         else:
             logs.append("❌ Audio file is empty or missing.")
             shutil.rmtree(temp_dir)
-            return {"status": "failed", "logs": logs}
+            return {"status": "failed", "language": language, "voice": resolved_voice, "logs": logs}
             
     except Exception as e:
         logs.append(f"❌ TTS Generation failed: {e}")
         shutil.rmtree(temp_dir)
-        return {"status": "error", "logs": logs}
+        return {"status": "error", "language": language, "voice": resolved_voice, "error": str(e), "logs": logs}
 
 @router.post("/generate-narrative", tags=["Video"])
 async def generate_narrative_video(
     background_tasks: BackgroundTasks,
-    files: List[UploadFile] = File(..., description="PDF or image files (PDF, JPG, PNG, GIF)"),
+    files: List[UploadFile] = File(..., description="PDF or image files (PDF, JPG, PNG, GIF, MP4)"),
     script: str = Form(..., description="JSON string containing the voice data script"),
     language: str = Form("fr-FR", description="Language code for TTS (e.g., en-US, fr-FR, es-ES)"),
     jobId: Optional[str] = Form(None, description="Unique job identifier for async callback workflow"),
@@ -84,12 +104,13 @@ async def generate_narrative_video(
     **Async Mode** (when callbackUrl provided):
     Returns HTTP 202 immediately and POSTs results to callbackUrl when complete.
     
-    Supported file types: PDF, JPG, JPEG, PNG, GIF
+    Supported file types: PDF, JPG, JPEG, PNG, GIF, MP4
     
     You can provide:
     - A single PDF file
     - A single image file (JPG, PNG) or animated GIF
-    - Multiple image files (will be processed in order)
+    - A single MP4 video (looped for the duration of the voiceover, like an animated GIF)
+    - Multiple image/GIF/MP4 files (will be processed in order, each as one looping slide)
     
     The script should be a JSON array of objects with:
     - page_number: int
@@ -110,7 +131,7 @@ async def generate_narrative_video(
     logger.info(f"{'='*80}")
 
     # Validate file types
-    allowed_extensions = ('.pdf', '.jpg', '.jpeg', '.png', '.gif')
+    allowed_extensions = ('.pdf', '.jpg', '.jpeg', '.png', '.gif', '.mp4')
     for file in files:
         if not file.filename.lower().endswith(allowed_extensions):
             logger.error(f"❌ Invalid file type: {file.filename}")
@@ -316,7 +337,8 @@ async def generate_narrative_video(
         headers = {
             "X-TTS-Cost-USD": str(tts_usage.get("total_cost_usd", 0)),
             "X-TTS-Characters": str(tts_usage.get("total_chars", 0)),
-            "X-TTS-Voice": str(tts_usage.get("voice_name", "unknown"))
+            "X-TTS-Voice": str(tts_usage.get("voice_name", "unknown")),
+            "X-TTS-Failed-Pages": str(tts_usage.get("failed_pages", 0)),
         }
         
         logger.info(f"\n📤 Sending response:")
@@ -364,6 +386,13 @@ def _run_narrative_job_async(
     
     start_time = time.time()
     
+    # Build a closure the video service can call to report progress
+    def _progress(step_key: str):
+        send_progress_callback(
+            callback_url, callback_secret, job_id, step_key,
+            document_id=document_id, project_id=project_id,
+        )
+    
     try:
         # Determine processing mode
         if len(saved_files) == 1:
@@ -380,7 +409,8 @@ def _run_narrative_job_async(
                     voice_data=voice_data,
                     workdir=temp_dir,
                     min_sections=3,
-                    language_code=language
+                    language_code=language,
+                    progress_callback=_progress
                 )
             )
             loop.close()
@@ -399,7 +429,8 @@ def _run_narrative_job_async(
                     voice_data=voice_data,
                     workdir=temp_dir,
                     min_sections=3,
-                    language_code=language
+                    language_code=language,
+                    progress_callback=_progress
                 )
             )
             loop.close()
@@ -431,6 +462,7 @@ def _run_narrative_job_async(
         logger.info(f"   Target environment: {environment.upper()}")
         
         # Update job status
+        _progress("uploading")
         update_job_status(job_id, "uploading", videoCount=len(results))
         
         # Import Supabase upload function
@@ -578,6 +610,11 @@ async def get_narrative_job_status(job_id: str):
     return {
         "jobId": job_id,
         "status": job_status.get("status"),
+        "step": job_status.get("step"),
+        "stepNumber": job_status.get("stepNumber"),
+        "totalSteps": job_status.get("totalSteps"),
+        "progressMessage": job_status.get("progressMessage"),
+        "progressDetail": job_status.get("progressDetail"),
         "createdAt": job_status.get("createdAt"),
         "updatedAt": job_status.get("updatedAt"),
         "fileCount": job_status.get("fileCount"),

@@ -4,6 +4,7 @@ __pycache__/
 *.pyd
 .env
 .venv/
+venv/
 .envrc
 *.sqlite3
 *.db
@@ -12,4 +13,22 @@ __pycache__/
 .idea/
 .vscode/
 *.ipynb_checkpoints/
-# Add more patterns as needed
+
+# Google Cloud service account keys
+gen-lang-client-*.json
+
+# Test output files
+test_output_local/
+uploads/
+debug/
+*.mp3
+*.wav
+*.mp4
+*.jpg
+*.zip
+*.ipynb
+
+# Test PDFs/images generated locally
+test_narrative.pdf
+test_report.pdf
+test_slide_simple.png

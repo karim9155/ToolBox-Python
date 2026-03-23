@@ -21,6 +21,74 @@ MAX_CALLBACK_RETRIES = int(os.getenv("MAX_CALLBACK_RETRIES", "3"))
 ALLOWED_CALLBACK_DOMAINS = os.getenv("ALLOWED_CALLBACK_DOMAINS", "")
 TOOLBOX_CALLBACK_SECRET = os.getenv("TOOLBOX_CALLBACK_SECRET", "")
 
+# Cinema-themed progress steps: key -> (stepNumber, totalSteps, message, detail)
+PROGRESS_STEPS = {
+    "extracting_images": (1, 6, "🎬 Act I — Reading the screenplay",       "Preparing your document for production"),
+    "adding_watermarks": (2, 6, "🎨 Act II — Applying studio branding",     "Adding production watermarks"),
+    "generating_audio":  (3, 6, "🎙️ Act III — Recording the voiceover",     "AI narrator is in the studio"),
+    "building_scenes":   (4, 6, "🎥 Act IV — Composing each scene",         "Building video frames from your slides"),
+    "final_cut":         (5, 6, "✂️ Act V — Editing the final cut",          "Assembling scenes into a polished sequence"),
+    "uploading":         (6, 6, "📤 Act VI — Preparing for premiere",        "Uploading your video to the cloud"),
+}
+
+
+def send_progress_callback(
+    callback_url: str,
+    callback_secret: Optional[str],
+    job_id: str,
+    step_key: str,
+    document_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> None:
+    """
+    Send a best-effort progress callback (single attempt, no retry).
+    Also updates in-memory job status for polling fallback.
+    """
+    step_info = PROGRESS_STEPS.get(step_key)
+    if not step_info:
+        return
+
+    step_number, total_steps, message, detail = step_info
+
+    # Update in-memory status so polling endpoint picks it up
+    update_job_status(
+        job_id, "processing",
+        step=step_key,
+        stepNumber=step_number,
+        totalSteps=total_steps,
+        progressMessage=message,
+        progressDetail=detail,
+    )
+
+    payload = {
+        "jobId": job_id,
+        "status": "progress",
+        "step": step_key,
+        "stepNumber": step_number,
+        "totalSteps": total_steps,
+        "message": message,
+        "detail": detail,
+    }
+    if document_id:
+        payload["documentId"] = document_id
+    if project_id:
+        payload["projectId"] = project_id
+
+    secret = callback_secret or TOOLBOX_CALLBACK_SECRET
+    if not secret:
+        return
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-callback-secret": secret,
+    }
+
+    try:
+        requests.post(callback_url, headers=headers, json=payload, timeout=10)
+        logger.info(f"📡 Progress callback sent: {step_key} ({step_number}/{total_steps})")
+    except Exception as e:
+        logger.warning(f"⚠️ Progress callback failed (best-effort): {e}")
+
 
 def validate_callback_url(url: str) -> bool:
     """

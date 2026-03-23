@@ -23,34 +23,49 @@ class EurLexScraper:
     SEARCH_URL = f"{BASE_URL}/search.html"
     LEGAL_CONTENT_URL = f"{BASE_URL}/legal-content/EN/TXT/"
 
-    def search(self, query: str, max_results: int = 10) -> list[LegalDocument]:
+    def search(self, query: str, max_results: int = 10, year_from: int = None, language: str = None) -> list[LegalDocument]:
         """Search EUR-Lex for documents matching *query*."""
         from scrapling.fetchers import Fetcher
 
-        params = {
+        lang_code = (language or "en").lower()
+        # Always use 'quick' search — 'advanced' returns HTTP 500 on EUR-Lex.
+        # DD_YEAR_FROM is harmless in the URL even if EUR-Lex ignores it for quick
+        # search; real date filtering is applied in Python after scraping.
+        params: dict = {
             "scope": "EURLEX",
             "type": "quick",
-            "lang": "en",
+            "lang": lang_code,
             "text": query,
         }
+        if lang_code != "en":
+            logger.info("[EUR-Lex] 🌍 Language override: lang=%s", lang_code)
+        if year_from:
+            params["DD_YEAR_FROM"] = str(year_from)
+            logger.info("[EUR-Lex] 📅 Date filter requested: year_from=%d (client-side post-filter active)", year_from)
         url = f"{self.SEARCH_URL}?{urlencode(params)}"
-        logger.info(f"[EUR-Lex] Searching: {url}")
+        logger.info("[EUR-Lex] 🌐 HTTP GET %s", url)
 
+        import time as _time
+        t0 = _time.perf_counter()
         try:
             page = Fetcher.get(url, stealthy_headers=True, timeout=30)
         except Exception as e:
-            logger.error(f"[EUR-Lex] Fetch error: {e}")
+            logger.error("[EUR-Lex] ❌ HTTP fetch failed: %s", e)
             raise RuntimeError(f"EUR-Lex search failed: {e}") from e
+        logger.info("[EUR-Lex] ⏱ Page fetched in %.2fs — HTTP %s", _time.perf_counter() - t0, getattr(page, 'status', '?'))
 
         documents: list[LegalDocument] = []
 
         # Each result is inside a <div class="SearchResult"> container
         result_items = page.css(".SearchResult")
+        logger.debug("[EUR-Lex] .SearchResult selector → %d items", len(result_items) if result_items else 0)
         if not result_items:
             # fallback: try list items inside results panel
             result_items = page.css("#results .result-item, .results-by-act li")
+            logger.debug("[EUR-Lex] Fallback selector → %d items", len(result_items) if result_items else 0)
 
-        for item in result_items[:max_results]:
+        # Parse all scraped items; year_from filtering is applied after
+        for item in result_items:
             # Title: EUR-Lex puts the title text inside <a class="title">,
             # but the text itself is split into <em> fragments (matched keywords).
             # Use get_all_text() to join them, or fall back to the `name` attribute
@@ -120,6 +135,10 @@ class EurLexScraper:
             summary = None
 
             if title:
+                logger.debug(
+                    "[EUR-Lex] ➕ doc celex=%r  type=%r  date=%r  title=%.60r",
+                    celex, doc_type, date, title,
+                )
                 documents.append(LegalDocument(
                     title=title,
                     url=href,
@@ -129,22 +148,47 @@ class EurLexScraper:
                     celex_or_id=celex,
                     summary=summary,
                 ))
+            else:
+                logger.debug("[EUR-Lex] ⏭ Skipped item — no title resolved (href=%r)", href)
 
-        logger.info(f"[EUR-Lex] Found {len(documents)} results")
-        return documents
+        logger.info("[EUR-Lex] 📊 Parsed %d/%d result items into documents", len(documents), len(result_items) if result_items else 0)
+
+        # Python-side date filter: EUR-Lex quick search ignores DD_YEAR_FROM in
+        # the URL, so we filter here. Date format from EUR-Lex is DD/MM/YYYY.
+        if year_from:
+            import re as _re
+            def _doc_year(doc: LegalDocument) -> Optional[int]:
+                if not doc.date:
+                    return None
+                m = _re.search(r'(\d{4})', doc.date)
+                return int(m.group(1)) if m else None
+
+            before = len(documents)
+            documents = [d for d in documents if (_doc_year(d) or year_from) >= year_from]
+            logger.info("[EUR-Lex] 📅 year_from=%d post-filter: %d → %d docs", year_from, before, len(documents))
+
+        return documents[:max_results]
 
     def get_document(self, celex: str) -> DocumentDetail:
         """Fetch a single EUR-Lex document by CELEX number."""
         from scrapling.fetchers import Fetcher
 
         url = f"{self.BASE_URL}/legal-content/AUTO/?uri=CELEX:{quote(celex)}"
-        logger.info(f"[EUR-Lex] Fetching document: {url}")
+        logger.info("[EUR-Lex] 📄 Fetching CELEX=%r → %s", celex, url)
 
+        import time as _time
+        t0 = _time.perf_counter()
         try:
             page = Fetcher.get(url, stealthy_headers=True, timeout=30)
         except Exception as e:
-            logger.error(f"[EUR-Lex] Fetch error: {e}")
+            logger.error("[EUR-Lex] ❌ Document fetch failed: %s", e)
             raise RuntimeError(f"EUR-Lex document fetch failed: {e}") from e
+        elapsed = _time.perf_counter() - t0
+        page_status = getattr(page, 'status', None)
+        logger.info("[EUR-Lex] ⏱ Document page fetched in %.2fs — HTTP %s", elapsed, page_status or '?')
+        if page_status and page_status >= 400:
+            logger.error("[EUR-Lex] ❌ Document returned HTTP %d for CELEX=%r", page_status, celex)
+            raise RuntimeError(f"EUR-Lex document {celex!r} not found (HTTP {page_status})")
 
         # Title: prefer the <title> tag on EUR-Lex TXT pages; it reads
         # "Regulation - 10/2011 - EN - EUR-Lex" which is decent.
@@ -152,10 +196,12 @@ class EurLexScraper:
         title_el = page.css("h1#translationTitle, h1.eli-title, h2.eli-title")
         if title_el:
             title = title_el[0].get_all_text().strip()
+            logger.debug("[EUR-Lex] Title from h1/h2.eli-title: %.80r", title)
         else:
             # Fall back to <title> tag (browser page title)
             page_title_el = page.css("title")
             title = page_title_el[0].text.strip() if page_title_el else f"CELEX:{celex}"
+            logger.debug("[EUR-Lex] Title from <title> tag: %.80r", title)
 
         # Main body text: #document1 is the primary content div on TXT pages
         body_el = page.css("#document1, .tabContent, .eli-main-title + div")
@@ -221,26 +267,37 @@ class LegiFranceScraper:
             "init": "true",
         }
         url = f"{self.SEARCH_URL}?{urlencode(params)}"
-        logger.info(f"[Legifrance] Searching: {url}")
+        logger.info("[Legifrance] 🥷 Launching StealthyFetcher (solve_cloudflare) — %s", url)
 
+        import time as _time
+        t0 = _time.perf_counter()
         try:
             page = StealthyFetcher.fetch(
                 url,
                 headless=True,
+                solve_cloudflare=True,
                 disable_resources=False,
                 network_idle=True,
                 timeout=60_000,
             )
         except Exception as e:
-            logger.error(f"[Legifrance] Fetch error: {e}")
+            logger.error("[Legifrance] ❌ StealthyFetcher failed after %.2fs: %s", _time.perf_counter() - t0, e)
             raise RuntimeError(f"Legifrance search failed: {e}") from e
+        elapsed = _time.perf_counter() - t0
+        page_status = getattr(page, 'status', None)
+        logger.info("[Legifrance] ⏱ Page rendered in %.2fs — HTTP %s — final URL: %s", elapsed, page_status or '?', getattr(page, 'url', url))
+        if page_status and page_status in (403, 429, 503):
+            logger.error("[Legifrance] ❌ Cloudflare/bot-protection blocked request (HTTP %d) — StealthyFetcher was detected", page_status)
+            raise RuntimeError(f"Legifrance blocked request (HTTP {page_status}) — Cloudflare protection active")
 
         documents: list[LegalDocument] = []
 
         # Results are in <article class="result-item"> containers
         result_items = page.css(".result-item")
+        logger.debug("[Legifrance] .result-item selector → %d items", len(result_items) if result_items else 0)
         if not result_items:
             result_items = page.css("article.result, .search-result-item")
+            logger.debug("[Legifrance] Fallback selector → %d items", len(result_items) if result_items else 0)
 
         for item in result_items[:max_results]:
             # Title: <h2 class="title-result-item"> — contains full title text
@@ -295,6 +352,10 @@ class LegiFranceScraper:
             elif title_lower.startswith("circulaire"):
                 doc_type = "Circulaire"
 
+            logger.debug(
+                "[Legifrance] ➕ doc id=%r  type=%r  url=%.80r  title=%.60r",
+                doc_id, doc_type, href, title,
+            )
             documents.append(LegalDocument(
                 title=title,
                 url=href,
@@ -305,7 +366,7 @@ class LegiFranceScraper:
                 summary=summary,
             ))
 
-        logger.info(f"[Legifrance] Found {len(documents)} results")
+        logger.info("[Legifrance] 📊 Parsed %d/%d result items into documents", len(documents), len(result_items) if result_items else 0)
         return documents
 
     def get_document(self, doc_id: str) -> DocumentDetail:
@@ -325,19 +386,23 @@ class LegiFranceScraper:
         else:
             url = f"{self.BASE_URL}/loda/id/{doc_id}"
 
-        logger.info(f"[Legifrance] Fetching document: {url}")
+        logger.info("[Legifrance] 🥷 Launching StealthyFetcher (solve_cloudflare) for document — id=%r  url=%s", doc_id, url)
 
+        import time as _time
+        t0 = _time.perf_counter()
         try:
             page = StealthyFetcher.fetch(
                 url,
                 headless=True,
+                solve_cloudflare=True,
                 disable_resources=False,
                 network_idle=True,
                 timeout=60_000,
             )
         except Exception as e:
-            logger.error(f"[Legifrance] Fetch error: {e}")
+            logger.error("[Legifrance] ❌ Document fetch failed after %.2fs: %s", _time.perf_counter() - t0, e)
             raise RuntimeError(f"Legifrance document fetch failed: {e}") from e
+        logger.info("[Legifrance] ⏱ Document page rendered in %.2fs — final URL: %s", _time.perf_counter() - t0, getattr(page, 'url', url))
 
         # Title: <h1> is the most reliable selector on all Legifrance page types
         title_el = page.css("h1")

@@ -27,6 +27,24 @@ app.include_router(pdf.router)
 app.include_router(narrative.router)
 app.include_router(scraper.router)
 
+
+@app.get("/health", tags=["Health"])
+def health_check():
+    """
+    Lightweight health check endpoint.
+    Called by the TypeScript client (isScraplingAvailable) with a 2-second timeout.
+    Must respond instantly — no browser launch, no heavy imports.
+    """
+    try:
+        # Verify Scrapling is importable (catches missing library / broken venv)
+        from scrapling import Fetcher as _ScraplingFetcher  # noqa: F401
+        scrapling_ready = True
+    except ImportError:
+        scrapling_ready = False
+
+    return {"status": "ok", "scrapling_ready": scrapling_ready}
+
+
 @app.get("/")
 def root():
     return {
